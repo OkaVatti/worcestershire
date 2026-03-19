@@ -1,0 +1,16 @@
+Globs:
+  - src/**/*.cr
+  - spec/**/*.cr
+  - "*.cr"
+
+Metrics/CyclomaticComplexity:
+  Enabled: false
+
+Metrics/PerceivedComplexity:
+  Enabled: false
+
+Style/VerboseBlock:
+  Enabled: false
+
+Lint/UnusedArgument:
+  Enabled: false

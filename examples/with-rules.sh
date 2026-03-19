@@ -1,0 +1,1 @@
+worcestershire -i words.txt --rules myrules.rule

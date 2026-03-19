@@ -1,0 +1,23 @@
+name: worcestershire
+version: 0.1.0
+
+authors:
+  - OkaVatti <okavatti@proton.me>
+
+description: A high-performance wordlist generator with concurrency support, spiritual successor to Wister.
+targets:
+  worcestershire:
+    main: src/worcestershire.cr
+
+crystal: '>= 1.19.1'
+
+license: MIT
+
+dependencies:
+  progress_bar.cr:
+    github: tpei/progress_bar.cr
+    branch: master
+
+development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
