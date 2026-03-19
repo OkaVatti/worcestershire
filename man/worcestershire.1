@@ -1,8 +1,340 @@
-.TH WORCESTERSHIRE 1 "March 2025" "Worcestershire 1.1.0" "User Commands"
+.TH WORCESTERSHIRE 1 "2026" "Worcestershire 1.0.0" "User Commands"
+.
 .SH NAME
-worcestershire \- advanced wordlist generator
+worcestershire \- high-performance wordlist generator
+.
 .SH SYNOPSIS
 .B worcestershire
 [\fIOPTIONS\fR]
+.
 .SH DESCRIPTION
-...
+.B worcestershire
+generates wordlists by applying one or more transformation strategies
+(combination types) to a set of input words.
+Output is streamed directly to disk so memory usage remains constant
+regardless of the size of the resulting wordlist.
+.PP
+When invoked without arguments the interactive setup wizard is launched.
+.
+.SH OPTIONS
+.
+.SS Input
+.TP
+.BR \-w ", " \-\-words " " \fIWORDS\fR
+Space-separated list of words to process.
+.TP
+.BR \-i ", " \-\-input " " \fIFILE\fR
+Read input words from \fIFILE\fR, one word per line.
+May be specified multiple times to load from several files.
+.
+.SS Output
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write output to \fIFILE\fR.
+Default: \fBoutput.lst\fR.
+.TP
+.B \-\-format " " \fIFMT\fR
+Output format.
+.RS
+.IP \fBtxt\fR
+One word per line (default).
+.IP \fBjson\fR
+One JSON object per line: \fB{"word":"value"}\fR.
+.IP \fBhashcat\fR
+One word per line, compatible with hashcat wordlist input.
+.RE
+.TP
+.B \-\-compress
+Compress the output file with gzip.
+.TP
+.B \-\-force
+Overwrite the output file without prompting.
+.TP
+.B \-\-dry\-run
+Estimate the number of combinations that would be generated and exit
+without writing any output.
+.TP
+.B \-\-quiet
+Suppress all non-essential output (progress bar, summary).
+.
+.SS Combination types
+.TP
+.BR \-c ", " \-\-combination " " \fICOMBOS\fR
+Space-separated list of combination type numbers to apply (1\(en8).
+See
+.B COMBINATION TYPES
+below.
+.TP
+.BR \-d ", " \-\-depth " " \fIDEPTH\fR
+Maximum number of words to mix together for combination type 1 (Word Mix).
+Accepted range: 2\(en5.
+Default: \fB3\fR.
+.TP
+.BR \-m ", " \-\-min " " \fIMIN\fR
+Discard output words shorter than \fIMIN\fR characters.
+Default: \fB0\fR.
+.TP
+.BR \-M ", " \-\-max " " \fIMAX\fR
+Discard output words longer than \fIMAX\fR characters.
+Default: \fB20\fR.
+.
+.SS Encoding and hashing
+.TP
+.BR \-e ", " \-\-encode " " \fIFORMAT\fR
+Encode or hash every output word before writing.
+Available formats:
+.BR base64 ", " base32 ", " url ", " hex ", " md5 ", " sha1 ", " sha256 ", " sha512 .
+.
+.SS Advanced
+.TP
+.B \-\-max\-combinations " " \fIN\fR
+Stop after generating \fIN\fR combinations.
+.TP
+.B \-\-rules " " \fIFILE\fR
+Apply a JTR-style rule file.
+Each line is one rule; a rule is a sequence of single-character commands
+applied left to right to each word.
+Supported commands: \fBl\fR (lowercase), \fBu\fR (uppercase),
+\fBc\fR (capitalise), \fBr\fR (reverse), \fBd\fR (duplicate),
+\fB$\fR (append !), \fB^\fR (prepend !).
+.TP
+.B \-\-resume " " \fIFILE\fR
+Resume a previously interrupted run.
+\fIFILE\fR is a JSON state file written by an earlier run.
+.TP
+.B \-\-log\-file " " \fIFILE\fR
+Append log messages to \fIFILE\fR instead of stdout.
+.TP
+.B \-\-log\-level " " \fILEVEL\fR
+Minimum log level to emit.
+One of \fBdebug\fR, \fBinfo\fR, \fBwarn\fR, \fBerror\fR.
+Default: \fBinfo\fR.
+.TP
+.B \-\-buffer\-size " " \fIBYTES\fR
+Output buffer size in bytes.
+Default: \fB1048576\fR (1 MiB).
+.TP
+.B \-\-no\-color
+Disable ANSI colour codes in terminal output.
+.TP
+.B \-\-parallel
+Enable multi-threaded generation.
+Requires the program to be compiled with \fB\-Dpreview_mt\fR.
+.TP
+.B \-\-workers " " \fIN\fR
+Number of concurrent worker fibers when \fB\-\-parallel\fR is active.
+Default: \fB4\fR.
+.TP
+.B \-\-cache\-size " " \fIN\fR
+Size of the LRU cache used to memoize encoding results.
+Default: \fB1000\fR.
+.TP
+.B \-\-max\-memory " " \fIBYTES\fR
+Abort if heap usage exceeds \fIBYTES\fR bytes.
+.
+.SS Custom dictionaries
+.TP
+.B \-\-homograph\-dict " " \fIFILE\fR
+Override the built-in homograph substitution table.
+.TP
+.B \-\-leet\-dict " " \fIFILE\fR
+Override the built-in leet substitution table.
+.TP
+.B \-\-salt\-dict " " \fIFILE\fR
+Override the built-in salt dictionary.
+.TP
+.B \-\-affix\-dict " " \fIFILE\fR
+Override the built-in affix dictionary.
+.
+.SS Configuration
+.TP
+.B \-\-config " " \fIFILE\fR
+Load options from a YAML configuration file.
+Command-line flags take precedence over file values.
+See
+.B CONFIGURATION FILE
+below for the supported keys.
+.
+.SS Informational
+.TP
+.BR \-l ", " \-\-list
+Print all combination types with their numbers and exit.
+.TP
+.B \-\-preset " " \fINAME\fR
+Apply a named preset before processing other options.
+Available presets:
+.BR password\-cracking ", " username\-enum ", " quick\-test .
+.TP
+.B \-\-suggest
+Analyse the input words and print a suggested set of combination types, then exit.
+.TP
+.BR \-V ", " \-\-verbose
+Print additional diagnostic messages during generation.
+.TP
+.BR \-N ", " \-\-noprogress
+Disable the progress bar.
+.TP
+.B \-\-examples
+Print usage examples and exit.
+.TP
+.B \-\-explain " " \fICOMBOS\fR
+Print a description of the specified combination types and exit.
+.TP
+.B \-\-interactive
+Launch the interactive setup wizard.
+.TP
+.BR \-v ", " \-\-version
+Print the version string and exit.
+.TP
+.BR \-h ", " \-\-help
+Print a help summary and exit.
+.
+.SH COMBINATION TYPES
+.TP
+.B 1 \ Word Mix
+Concatenates permutations of the input words at depths 2 through
+.I DEPTH
+(see \fB\-d\fR).
+For two words \fIpass\fR and \fIword\fR at depth 2 this produces
+\fIpassword\fR and \fIwordpass\fR.
+.TP
+.B 2 \ Case Alternate
+Generates every possible upper/lower case variant of each word.
+For words longer than 10 characters only three variants are generated
+(lowercase, uppercase, capitalised) to avoid combinatorial explosion.
+.TP
+.B 3 \ Homograph
+Substitutes characters with visually similar alternatives drawn from the
+homograph dictionary.
+For example: \fIa\fR becomes \fI@\fR, \fI4\fR, \fI\[*a]\fR, or a Cyrillic
+look-alike.
+.TP
+.B 4 \ Reverser
+Reverses each word character by character.
+.TP
+.B 5 \ Saltify
+Prepends and appends each entry in the salt dictionary to each word.
+.TP
+.B 6 \ Leet Speak
+Substitutes characters with common leet equivalents
+(\fIe\fR\(->3, \fIs\fR\(->5, \fIo\fR\(->0, etc.).
+.TP
+.B 7 \ Separator Insert
+Joins pairs and triples of input words with separator characters
+(\fI\-\fR, \fI_\fR, \fI.\fR, \fI+\fR, \fI@\fR, and the empty string).
+.TP
+.B 8 \ Affix
+Prepends and appends entries from the affix dictionary to each word.
+.
+.SH CONFIGURATION FILE
+A YAML file passed via \fB\-\-config\fR may contain the following keys.
+All values are optional; any that are absent are left at their defaults
+or taken from the command line.
+.PP
+.nf
+depth:            integer (2-5)
+min_length:       integer (0-49)
+max_length:       integer (1-50)
+format:           string  (txt | json | hashcat)
+compress:         boolean
+max_combinations: integer
+buffer_size:      integer
+workers:          integer
+cache_size:       integer
+max_memory:       integer
+combinations:
+  - integer
+  - integer
+.fi
+.
+.SH PRESETS
+Presets apply a pre-defined configuration tuned for a specific use case.
+Command-line flags override preset values.
+.TP
+.B password\-cracking
+All combination types, depth 4, length 8\(en32, compressed txt output,
+10\|000\|000 combination limit.
+.TP
+.B username\-enum
+Combination types 2, 4, 7, depth 2, length 4\(en20, plain txt output,
+1\|000\|000 combination limit.
+.TP
+.B quick\-test
+Combination types 1 and 2, depth 2, base64 encoding, JSON output,
+1\|000 combination limit.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Successful completion.
+.TP
+.B 1
+An error occurred (bad option, missing file, encoding error, memory limit exceeded, etc.).
+.
+.SH FILES
+.TP
+.I output.lst
+Default output file when \fB\-o\fR is not specified.
+.TP
+.I state.json
+Conventional name for a resume state file (any path may be used).
+.
+.SH EXAMPLES
+Generate a wordlist from two words using Word Mix and Case Alternate:
+.PP
+.RS
+.nf
+worcestershire \-w "password admin" \-c 1 2 \-o wordlist.txt
+.fi
+.RE
+.PP
+Process a file with all combination types and compress the output:
+.PP
+.RS
+.nf
+worcestershire \-i base.txt \-c 1 2 3 4 5 6 7 8 \-\-compress \-o full.lst.gz
+.fi
+.RE
+.PP
+Hash every output word with SHA256:
+.PP
+.RS
+.nf
+worcestershire \-i words.txt \-e sha256 \-o hashes.txt
+.fi
+.RE
+.PP
+Use the password-cracking preset:
+.PP
+.RS
+.nf
+worcestershire \-i words.txt \-\-preset password\-cracking \-o cracking.lst
+.fi
+.RE
+.PP
+Estimate output size without writing:
+.PP
+.RS
+.nf
+worcestershire \-i words.txt \-c 1 2 3 \-\-dry\-run
+.fi
+.RE
+.PP
+Resume an interrupted run:
+.PP
+.RS
+.nf
+worcestershire \-i words.txt \-c 1 2 \-o out.lst \-\-resume state.json \-\-force
+.fi
+.RE
+.
+.SH SEE ALSO
+.BR hashcat (1),
+.BR john (1),
+.BR crunch (1)
+.
+.SH AUTHORS
+OkaVatti <okavatti@proton.me>
+.
+.SH LICENSE
+MIT License. See the LICENSE file distributed with the source.
