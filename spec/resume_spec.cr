@@ -14,8 +14,19 @@ module Worcestershire
       end
     end
 
+    it "round-trips a large position value (> Int32::MAX)" do
+      large_pos = (Int32::MAX.to_u64 + 1_u64)
+      state = ResumeState.new(position: large_pos)
+      with_tempfile("state_large", ".json") do |path|
+        state.save(path)
+        loaded = ResumeState.load(path)
+        loaded.should_not be_nil
+        loaded.try(&.position).should eq(large_pos)
+      end
+    end
+
     it "returns nil if file does not exist" do
-      ResumeState.load("nonexistent.json").should be_nil
+      ResumeState.load("nonexistent_state_file.json").should be_nil
     end
 
     it "returns nil if JSON is invalid" do

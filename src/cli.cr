@@ -25,24 +25,24 @@ module Worcestershire
     property config_file : String?
     property max_combinations : UInt64?
     property rule_file : String?
-    property resume : String?                # state file to resume from
-    property log_file : String?              # log file path
-    property log_level : String = "info"     # debug, info, warn, error
-    property buffer_size : Int32 = 1_048_576 # 1 MB default
-    property no_color : Bool = false         # colorblind/script friendly
-    property force : Bool = false            # overwrite output without prompt
-    property dry_run : Bool = false          # only estimate, don't generate
-    property quiet : Bool = false            # suppress all non‑essential output
-    property preset : String?                # preset name
-    property suggest : Bool = false          # suggest combinations and exit
-    property homograph_dict : String?        # custom homograph file
-    property leet_dict : String?             # custom leet file
-    property salt_dict : String?             # custom salt file
-    property affix_dict : String?            # custom affix file
-    property parallel : Bool = false         # use true parallelism (MT)
-    property workers : Int32 = 4             # number of concurrent workers
-    property cache_size : Int32 = 1000       # encoding cache size
-    property max_memory : UInt64?            # max memory in bytes (optional)
+    property resume : String?
+    property log_file : String?
+    property log_level : String = "info"
+    property buffer_size : Int32 = 1_048_576
+    property no_color : Bool = false
+    property force : Bool = false
+    property dry_run : Bool = false
+    property quiet : Bool = false
+    property preset : String?
+    property suggest : Bool = false
+    property homograph_dict : String?
+    property leet_dict : String?
+    property salt_dict : String?
+    property affix_dict : String?
+    property parallel : Bool = false
+    property workers : Int32 = 4
+    property cache_size : Int32 = 1000
+    property max_memory : UInt64?
 
     def initialize(
       @words = [] of String,
@@ -82,7 +82,6 @@ module Worcestershire
     )
     end
 
-    # Load configuration from YAML file (if provided) and merge with CLI
     def load_config!
       return unless config = @config_file
       begin
@@ -121,7 +120,7 @@ module Worcestershire
         parser.banner = "Usage: worcestershire [arguments]"
 
         # ===== Input =====
-        parser.on("-w WORDS", "--words WORDS", "Space‑separated words to process") do |words|
+        parser.on("-w WORDS", "--words WORDS", "Space-separated words to process") do |words|
           @options.words = words.split
         end
 
@@ -150,12 +149,12 @@ module Worcestershire
           @options.dry_run = true
         end
 
-        parser.on("--quiet", "Suppress all non‑essential output") do
+        parser.on("--quiet", "Suppress all non-essential output") do
           @options.quiet = true
         end
 
         # ===== Combinations =====
-        parser.on("-c COMBOS", "--combination COMBOS", "Combination types (1-8, space‑separated)") do |combos|
+        parser.on("-c COMBOS", "--combination COMBOS", "Combination types (1-8, space-separated)") do |combos|
           @options.combinations = combos.split.map(&.to_i)
         end
 
@@ -204,7 +203,7 @@ module Worcestershire
           @options.no_color = true
         end
 
-        parser.on("--parallel", "Enable multi‑threading (requires -Dpreview_mt)") do
+        parser.on("--parallel", "Enable multi-threading (requires -Dpreview_mt)") do
           @options.parallel = true
         end
 
@@ -235,6 +234,12 @@ module Worcestershire
 
         parser.on("--affix-dict FILE", "Custom affix dictionary file") do |file|
           @options.affix_dict = file
+        end
+
+        # ===== Config =====
+        # NOTE: this was missing in the original, causing --config to be silently ignored.
+        parser.on("--config FILE", "Load options from a YAML config file") do |file|
+          @options.config_file = file
         end
 
         # ===== Helpful =====
@@ -290,16 +295,14 @@ module Worcestershire
         end
       end
 
-      # Load config if provided
       @options.load_config! if @options.config_file
 
-      # Apply preset if provided
       if preset = @options.preset
         @options = Worcestershire.apply_preset(preset, @options)
       end
 
-      # Handle special actions
       handle_list_combinations
+
       if @options.suggest
         words = load_words_for_suggestion
         suggested = Worcestershire::Heuristics.suggest_combinations(words)
@@ -369,10 +372,10 @@ module Worcestershire
           case c
           when 1 then puts "  1. Word Mix: Combines multiple words (e.g., 'pass' + 'word' = 'password'). Depth controls how many words are mixed."
           when 2 then puts "  2. Case Alternate: Generates all case variations (e.g., 'Password', 'PASSWORD', 'pASSWORD')."
-          when 3 then puts "  3. Homograph: Substitutes characters with visually similar ones (e.g., 'a' → '@', '4')."
+          when 3 then puts "  3. Homograph: Substitutes characters with visually similar ones (e.g., 'a' -> '@', '4')."
           when 4 then puts "  4. Reverser: Reverses words (e.g., 'drowssap')."
           when 5 then puts "  5. Saltify: Adds common salts before/after words (e.g., '123password', 'password!')."
-          when 6 then puts "  6. Leet Speak: Applies leet substitutions (e.g., 'e' → '3', 's' → '5')."
+          when 6 then puts "  6. Leet Speak: Applies leet substitutions (e.g., 'e' -> '3', 's' -> '5')."
           when 7 then puts "  7. Separator Insert: Joins words with separators like '-', '_', '.'."
           when 8 then puts "  8. Affix: Adds common prefixes and suffixes (e.g., '!', '?', '2024')."
           else        puts "  #{c}: Unknown type"

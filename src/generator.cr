@@ -16,8 +16,12 @@ module Worcestershire
   class Generator
     @options : Options
     @words : Array(String)
-    @stats : NamedTuple(total_generated: UInt64, filtered: UInt64, start_time: Time)
+    @total_generated : UInt64
+    @filtered : UInt64
+    @start_time : Time
     @channel : Channel(String)
+    # Dedicated channel for signalling that a producer fiber is done.
+    @done_channel : Channel(Nil)
     @rules_engine : RuleEngine?
     @affixes : Array(String)
     @logger : Logger
@@ -27,18 +31,16 @@ module Worcestershire
     @mutex : Mutex
 
     def initialize(@options, @words)
-      @stats = {
-        total_generated: 0_u64,
-        filtered:        0_u64,
-        start_time:      Time.utc,
-      }
-      @channel = Channel(String).new(10_000) # bounded channel
+      @total_generated = 0_u64
+      @filtered = 0_u64
+      @start_time = Time.utc
+      @channel = Channel(String).new(10_000)
+      @done_channel = Channel(Nil).new
       @affixes = DEFAULT_AFFIXES.dup
       if (rule_file = @options.rule_file)
         @rules_engine = RuleEngine.new(rule_file)
       end
 
-      # Initialize logger
       log_io = if (log_file = @options.log_file)
                  File.open(log_file, "a")
                else
@@ -53,25 +55,18 @@ module Worcestershire
                   else              LogLevel::Info
                   end
       @logger = Logger.new(level: log_level, io: log_io)
-
-      # Initialize cache
       @cache = LRUCache(String, String).new(@options.cache_size)
-
-      # Initialize worker pool if parallel mode requested
       @pool = WorkerPool.new(@options.workers) if @options.parallel
+      @mutex = Mutex.new
 
-      # Load resume state if provided
       if resume_file = @options.resume
         @resume_state = ResumeState.load(resume_file)
-        # Use local variable to avoid nil issues
         if state = @resume_state
-          @logger.info "Resuming from state saved at #{state.timestamp}"
+          @logger.info("Resuming from state saved at #{state.timestamp}")
         else
-          @logger.warn "Resume file not found or invalid, starting fresh"
+          @logger.warn("Resume file not found or invalid, starting fresh")
         end
       end
-
-      @mutex = Mutex.new
     end
 
     def run
@@ -81,7 +76,6 @@ module Worcestershire
         return
       end
 
-      # Check if output exists and not forced
       if File.exists?(@options.output_file) && !@options.force && !@options.quiet
         print "Output file #{@options.output_file} exists. Overwrite? (y/n) "
         if gets.to_s.strip.downcase != "y"
@@ -90,16 +84,15 @@ module Worcestershire
         end
       end
 
-      # Start memory monitor if limit set
       if max_mem = @options.max_memory
-        spawn monitor_memory(max_mem)
+        spawn { monitor_memory(max_mem) }
       end
 
       setup_signal_handler
 
       if @options.combinations.empty?
         @logger.info("No combinations selected - using base words only")
-        process_words(@options.words)
+        process_words(@words)
       else
         generate_concurrent
       end
@@ -108,10 +101,9 @@ module Worcestershire
     private def setup_signal_handler
       Signal::INT.trap do
         puts "\nReceived SIGINT. Stopping gracefully...".colorize(:yellow)
-        # Capture resume state to avoid nil ambiguity
-        if state = @resume_state
-          state.save(@options.resume.not_nil!)
-          @logger.info "Saved resume state to #{@options.resume}"
+        if (resume_path = @options.resume) && (state = @resume_state)
+          state.save(resume_path)
+          @logger.info("Saved resume state to #{resume_path}")
         end
         print_summary
         exit 0
@@ -120,37 +112,35 @@ module Worcestershire
 
     private def generate_concurrent
       total_estimate = estimate_total_combinations
-      if (max_comb = @options.max_combinations) && total_estimate > max_comb
-        @logger.warn("Estimated combinations (#{total_estimate}) exceeds limit (#{max_comb}). Stopping.")
-        exit 0
-      end
 
-      # Start producer fibers for each combination type
+      # Launch one producer fiber per combination type.
       @options.combinations.each do |combo_type|
-        if @pool
-          @pool.not_nil!.schedule { generate_combinations(combo_type) }
+        if pool = @pool
+          pool.schedule { produce(combo_type) }
         else
-          spawn generate_combinations(combo_type)
+          spawn { produce(combo_type) }
         end
       end
 
-      # Start consumer – now passing UInt64
-      if @pool
-        @pool.not_nil!.schedule { consume_results(total_estimate) }
-      else
-        spawn consume_results(total_estimate)
-      end
+      # Launch the consumer fiber.
+      spawn { consume_results(total_estimate) }
 
-      # Wait for all producers to finish (they send "__DONE__")
-      @options.combinations.size.times do
-        select
-        when @channel.receive
-          # just wait
-        end
-      end
+      # Wait for all producers to signal completion via @done_channel.
+      @options.combinations.size.times { @done_channel.receive }
 
-      # Shutdown pool if used
+      # All producers are done; close the word channel so the consumer can drain
+      # any remaining items and then exit its loop.
+      @channel.close
+
+      # Shutdown pool if used.
       @pool.try(&.shutdown)
+    end
+
+    # Wrapper that signals the done channel after each producer finishes.
+    private def produce(combo_type : Int32)
+      generate_combinations(combo_type)
+    ensure
+      @done_channel.send(nil)
     end
 
     private def generate_combinations(combo_type : Int32)
@@ -166,18 +156,14 @@ module Worcestershire
       else
         @logger.debug("Unknown combination type: #{combo_type}")
       end
-    ensure
-      @channel.send("__DONE__")
     end
-
-    # --- Existing combination methods ---
 
     private def word_mix_combinations
       @logger.debug("Generating word mixes with depth #{@options.depth}")
       (2..@options.depth).each do |current_depth|
+        next if @words.size < current_depth
         @words.each_permutation(current_depth) do |perm|
-          word = perm.join
-          send_word(word)
+          send_word(perm.join)
         end
       end
     end
@@ -204,9 +190,7 @@ module Worcestershire
 
     private def reverse_combinations
       @logger.debug("Generating reversed words")
-      @words.each do |word|
-        send_word(word.reverse)
-      end
+      @words.each { |word| send_word(word.reverse) }
     end
 
     private def saltify_combinations
@@ -219,8 +203,6 @@ module Worcestershire
       end
     end
 
-    # --- New combination methods ---
-
     private def leet_combinations
       @logger.debug("Generating leet (1337) substitutions")
       @words.each do |word|
@@ -231,10 +213,10 @@ module Worcestershire
     private def separator_combinations
       @logger.debug("Generating separator insertions")
       (2..3).each do |current_depth|
+        next if @words.size < current_depth
         @words.each_permutation(current_depth) do |perm|
           SEPARATORS.each do |sep|
-            word = perm.join(sep)
-            send_word(word)
+            send_word(perm.join(sep))
           end
         end
       end
@@ -244,46 +226,50 @@ module Worcestershire
       @logger.debug("Applying prefix/suffix")
       @words.each do |word|
         @affixes.each do |affix|
-          send_word(affix + word) # prefix
-          send_word(word + affix) # suffix
+          send_word(affix + word)
+          send_word(word + affix)
         end
       end
     end
 
-    # --- Helper methods for generating variations ---
+    # --- Helper: send a word through the pipeline ---
 
     private def send_word(word : String)
       return unless valid_length?(word)
 
-      # Capture resume state to avoid nil ambiguity
-      if state = @resume_state
-        if state.position > @stats[:total_generated]
-          @mutex.synchronize do
-            @stats = @stats.merge({total_generated: @stats[:total_generated] + 1})
-          end
+      # Resume: skip words whose position index is strictly less than the
+      # saved position (i.e. they were already generated in a prior run).
+      @mutex.synchronize do
+        if (state = @resume_state) && @total_generated < state.position
+          @total_generated += 1
           return
         end
       end
 
-      if engine = @rules_engine
-        engine.apply(word).each { |w| @channel.send(w) if valid_length?(w) }
-      else
-        @channel.send(word)
+      begin
+        if engine = @rules_engine
+          engine.apply(word).each do |w|
+            @channel.send(w) if valid_length?(w)
+          end
+        else
+          @channel.send(word)
+        end
+      rescue Channel::ClosedError
+        return
       end
 
-      # Update stats and optionally save resume state
       @mutex.synchronize do
-        @stats = @stats.merge({total_generated: @stats[:total_generated] + 1})
-        if (state = @resume_state) && @stats[:total_generated] % 10_000 == 0
+        @total_generated += 1
+        if (resume_path = @options.resume) && (state = @resume_state) && @total_generated % 10_000 == 0
           state.last_word = word
-          state.position = @stats[:total_generated]
-          state.save(@options.resume.not_nil!)
-          @logger.debug("Saved resume state at position #{@stats[:total_generated]}")
+          state.position = @total_generated
+          state.save(resume_path)
+          @logger.debug("Saved resume state at position #{@total_generated}")
         end
       end
-    rescue Channel::ClosedError
-      # consumer stopped, exit gracefully
     end
+
+    # --- Variation generators ---
 
     private def generate_case_variations(word : String) : Array(String)
       variations = [] of String
@@ -296,106 +282,89 @@ module Worcestershire
       variations.uniq
     end
 
+    # Generates homograph substitutions positionally: for each character that
+    # has substitutions, produce new variants by replacing that single position
+    # across all existing variants.
     private def generate_homographs(word : String) : Array(String)
-      variations = [word]
+      variants = [word]
       word.chars.each_with_index do |char, idx|
-        if subs = HOMOGRAPH_DICT[char]?
-          current = variations.dup
-          subs.each do |sub|
-            current.each do |var|
-              variations << var.sub(char, sub)
-            end
+        next unless subs = HOMOGRAPH_DICT[char]?
+        new_variants = [] of String
+        subs.each do |sub|
+          variants.each do |var|
+            chars = var.chars
+            chars[idx] = sub[0] # sub is a String; take first char-equivalent
+            new_variants << chars.join
           end
         end
+        variants.concat(new_variants)
       end
-      variations.uniq
+      variants.uniq
     end
 
     private def generate_leet(word : String) : Array(String)
-      variations = [word]
+      variants = [word]
       word.chars.each_with_index do |char, idx|
-        if subs = LEET_DICT[char]?
-          current = variations.dup
-          subs.each do |sub|
-            current.each do |var|
-              variations << var.sub(char, sub)
-            end
+        next unless subs = LEET_DICT[char]?
+        new_variants = [] of String
+        subs.each do |sub|
+          variants.each do |var|
+            chars = var.chars
+            chars[idx] = sub[0]
+            new_variants << chars.join
           end
         end
+        variants.concat(new_variants)
       end
-      variations.uniq
+      variants.uniq
     end
 
-    # --- Consumer with buffered writing and compression ---
+    # --- Consumer ---
 
     private def consume_results(total_estimate : UInt64)
-      # Convert to Int32 safely for progress bar (clamp to Int32 max)
       ticks_for_progress = total_estimate.clamp(0_u64, Int32::MAX.to_u64).to_i32
       progress = ProgressWrapper.new(ticks_for_progress, !@options.no_progress && !@options.quiet && !@options.verbose)
       progress.init("Generating wordlist...")
 
-      output_io = open_output_io
-      buffer = IO::Memory.new
-      done_count = 0
       generated = 0_u64
 
-      while done_count < @options.combinations.size
-        select
-        when result = @channel.receive
-          if result == "__DONE__"
-            done_count += 1
+      open_output_io do |output_io|
+        # Drain the channel until it is closed and empty.
+        while result = @channel.receive?
+          encoded = apply_encoding(result)
+          case @options.format
+          when "json"
+            output_io.puts({word: encoded}.to_json)
+          when "hashcat"
+            output_io.puts encoded
           else
-            # Apply encoding and write to buffer
-            encoded = apply_encoding(result)
-            case @options.format
-            when "json"
-              buffer.puts({word: encoded}.to_json)
-            when "hashcat"
-              # Simple hashcat mask format (can be extended)
-              buffer.puts encoded
-            else
-              buffer.puts encoded
-            end
-            generated += 1
-            @stats = @stats.merge({total_generated: generated})
+            output_io.puts encoded
+          end
+          generated += 1
+          progress.tick
 
-            # Flush buffer periodically
-            if buffer.size > @options.buffer_size
-              output_io.write(buffer.to_slice)
-              buffer.clear
-            end
-
-            progress.tick
-
-            # Check max combinations limit
-            if (max_comb = @options.max_combinations) && generated >= max_comb
-              @logger.info("Reached maximum combinations limit (#{max_comb}). Stopping.")
-              break
-            end
+          if (max_comb = @options.max_combinations) && generated >= max_comb
+            @logger.info("Reached maximum combinations limit (#{max_comb}). Stopping.")
+            break
           end
         end
       end
 
-      # Flush remaining buffer
-      output_io.write(buffer.to_slice) if buffer.size > 0
-      output_io.close
-
+      @mutex.synchronize { @total_generated = generated }
       progress.finish
       print_summary
     end
 
-    # --- Processor for base words (no combinations) ---
+    # --- Base-word processor (no combinations selected) ---
 
     private def process_words(words : Array(String))
-      total = words.size
-      progress = ProgressWrapper.new(total, !@options.no_progress && !@options.quiet && !@options.verbose)
+      progress = ProgressWrapper.new(words.size, !@options.no_progress && !@options.quiet && !@options.verbose)
       progress.init("Processing base words...")
 
-      # Use block form for safe IO handling
-      open_output_io do |output_io|
-        generated = 0_u64
-        filtered = 0_u64
+      generated = 0_u64
+      filtered = 0_u64
 
+      open_output_io do |output_io|
         words.each do |word|
           if valid_length?(word)
             encoded = apply_encoding(word)
@@ -413,35 +382,20 @@ module Worcestershire
           end
           progress.tick
         end
-
-        @stats = @stats.merge({total_generated: generated, filtered: filtered})
       end
 
+      @total_generated = generated
+      @filtered = filtered
       progress.finish
       print_summary
     end
 
-    # --- Overloaded IO open methods ---
-
-    # Version that returns the IO (caller must close)
-    private def open_output_io : IO
-      file = File.open(@options.output_file, "w")
-      if @options.compress
-        Compress::Gzip::Writer.new(file, sync_close: true)
-      else
-        file
-      end
-    end
-
-    # Version that yields the IO and ensures it's closed
+    # Block form: yields the IO and ensures it is closed regardless of errors.
     private def open_output_io(& : IO ->)
       File.open(@options.output_file, "w") do |file|
         if @options.compress
-          gzip_writer = Compress::Gzip::Writer.new(file, sync_close: true)
-          begin
-            yield gzip_writer
-          ensure
-            gzip_writer.close
+          Compress::Gzip::Writer.open(file, sync_close: true) do |gz|
+            yield gz
           end
         else
           yield file
@@ -449,7 +403,7 @@ module Worcestershire
       end
     end
 
-    # --- Utility methods ---
+    # --- Utilities ---
 
     private def valid_length?(word : String) : Bool
       word.size >= @options.min_length && word.size <= @options.max_length
@@ -458,11 +412,7 @@ module Worcestershire
     private def apply_encoding(word : String) : String
       if enc = @options.encoding
         @cache.fetch("#{enc}:#{word}") do
-          if processor = ENCODING_TYPES[enc]?
-            processor.call(word)
-          else
-            word
-          end
+          ENCODING_TYPES[enc]?.try(&.call(word)) || word
         end
       else
         word
@@ -473,35 +423,42 @@ module Worcestershire
       total = 0_u64
       @options.combinations.each do |combo|
         case combo
-        when 1 then total += (@words.size ** (@options.depth - 1)) * 100
-        when 2 then total += @words.sum { |w| 2_u64 ** [w.size, 10].min }
-        when 3 then total += @words.sum { |w| HOMOGRAPH_DICT.values.sum(&.size) + 1 }
-        when 4 then total += @words.size
-        when 5 then total += @words.size * SALT_DICT.size * 2
-        when 6 then total += @words.sum { |w| LEET_DICT.values.sum(&.size) + 1 }
-        when 7 then total += @words.size * (@words.size) * SEPARATORS.size # rough
-        when 8 then total += @words.size * @affixes.size * 2
+        when 1 then total += (@words.size ** (@options.depth - 1)).to_u64 * 100
+        when 2 then total += @words.sum(0_u64) { |w| 2_u64 ** [w.size, 10].min }
+        when 3 then total += @words.sum(0_u64) { |w| (HOMOGRAPH_DICT.values.sum(&.size) + 1).to_u64 }
+        when 4 then total += @words.size.to_u64
+        when 5 then total += @words.size.to_u64 * SALT_DICT.size.to_u64 * 2_u64
+        when 6 then total += @words.sum(0_u64) { |w| (LEET_DICT.values.sum(&.size) + 1).to_u64 }
+        when 7 then total += @words.size.to_u64 * @words.size.to_u64 * SEPARATORS.size.to_u64
+        when 8 then total += @words.size.to_u64 * @affixes.size.to_u64 * 2_u64
         end
       end
-      total = 1_u64 if total == 0
-      total
+      total == 0_u64 ? 1_u64 : total
     end
 
     private def print_summary
-      elapsed = Time.utc - @stats[:start_time]
-      puts "\n" unless @options.quiet
-      puts "=== Summary ===".colorize(:green).bold unless @options.no_color
-      puts "Total generated: #{@stats[:total_generated]}".colorize(:yellow) unless @options.no_color
-      puts "Filtered (length constraints): #{@stats[:filtered]}".colorize(:yellow) unless @options.no_color
-      puts "Time elapsed: #{elapsed.total_seconds.round(2)}s".colorize(:yellow) unless @options.no_color
+      elapsed = Time.utc - @start_time
+      puts "" unless @options.quiet
+      if @options.no_color
+        puts "=== Summary ==="
+        puts "Total generated: #{@total_generated}"
+        puts "Filtered (length constraints): #{@filtered}"
+        puts "Time elapsed: #{elapsed.total_seconds.round(2)}s"
+      else
+        puts "=== Summary ===".colorize(:green).bold
+        puts "Total generated: #{@total_generated}".colorize(:yellow)
+        puts "Filtered (length constraints): #{@filtered}".colorize(:yellow)
+        puts "Time elapsed: #{elapsed.total_seconds.round(2)}s".colorize(:yellow)
+      end
     end
 
     private def monitor_memory(limit : UInt64)
       loop do
         sleep 5.seconds
-        stats = GC.stats
-        if stats.total_bytes > limit
-          @logger.error("Memory limit exceeded (#{stats.total_bytes} > #{limit}). Aborting.")
+        # GC::Stats#heap_size is the correct field in Crystal 1.19.1.
+        used = GC.stats.heap_size
+        if used > limit
+          @logger.error("Memory limit exceeded (#{used} > #{limit}). Aborting.")
           exit 1
         end
       end

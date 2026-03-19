@@ -1,17 +1,29 @@
 module Worcestershire
+  # WorkerPool manages a fixed number of fiber workers that pull tasks from a
+  # shared queue channel.  shutdown drains the queue and waits for all workers
+  # to exit cleanly.
   class WorkerPool
-    @workers = [] of Fiber
-    @queue = Channel(->).new
-    @done = Channel(Nil).new
+    @queue : Channel(Proc(Nil))
+    @finished : Channel(Nil)
+    @size : Int32
 
-    def initialize(size : Int32)
-      size.times do
-        @workers << spawn do
+    def initialize(@size : Int32)
+      @queue = Channel(Proc(Nil)).new
+      @finished = Channel(Nil).new(@size)
+
+      @size.times do
+        spawn do
+          # Each worker pulls tasks until the queue is closed.
           while task = @queue.receive?
-            task.call
+            begin
+              task.call
+            rescue ex
+              # Swallow task-level errors so the worker stays alive.
+              STDERR.puts "WorkerPool task error: #{ex.message}"
+            end
           end
-        rescue Channel::ClosedError
-          next
+        ensure
+          @finished.send(nil)
         end
       end
     end
@@ -20,10 +32,11 @@ module Worcestershire
       @queue.send(task)
     end
 
+    # Close the queue (signals workers to stop) then wait for every worker to
+    # finish.  Safe to call from the main fiber.
     def shutdown
       @queue.close
-      @workers.each { |f| f.resume }        # wake any sleeping fibers
-      @workers.size.times { @done.receive } # wait for all to finish
+      @size.times { @finished.receive }
     end
   end
 end

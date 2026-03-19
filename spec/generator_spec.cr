@@ -1,6 +1,6 @@
 require "./spec_helper"
 
-# Helper to run generator and return output lines
+# Helper to run the generator and return the lines written to the output file.
 def run_and_read(options : Worcestershire::Options, input_words : Array(String)) : Array(String)
   with_tempfile("output", ".txt") do |out_path|
     options.output_file = out_path
@@ -8,8 +8,9 @@ def run_and_read(options : Worcestershire::Options, input_words : Array(String))
     options.quiet = true
     generator = Worcestershire::Generator.new(options, input_words)
     generator.run
-    File.read_lines(out_path)
+    return File.read_lines(out_path)
   end
+  [] of String
 end
 
 module Worcestershire
@@ -84,6 +85,16 @@ module Worcestershire
         output_lines.should contain("!word")
         output_lines.should contain("word!")
       end
+
+      it "does not raise when word count is less than depth" do
+        # With only one word and depth 3, each_permutation would raise
+        # ArgumentError in the original; the fix guards against this.
+        options = Options.new(combinations: [1], depth: 3)
+        input = ["solo"]
+        output_lines = run_and_read(options, input)
+        # No combinations possible at depth 2+ with a single word; output is empty.
+        output_lines.should eq([] of String)
+      end
     end
 
     describe "length filtering" do
@@ -133,23 +144,23 @@ module Worcestershire
     end
 
     describe "resume" do
-      it "skips already generated words" do
-        # Create a resume state with position 1
+      it "skips already-generated words" do
         state = ResumeState.new(position: 1_u64)
         state_path = with_tempfile("state", ".json") do |path|
-          File.write(path, state.to_json)
+          state.save(path)
           path
         end
 
         options = Options.new(combinations: [4], resume: state_path) # reverse
-        input = ["abc", "def"]                                       # reverse will generate "cba", "fed"
+        input = ["abc", "def"]
         output_lines = run_and_read(options, input)
+        # Position 0 ("cba") is skipped; position 1 ("fed") is included.
         output_lines.should eq(["fed"])
       end
     end
 
     describe "max combinations limit" do
-      it "stops when limit reached" do
+      it "stops when limit is reached" do
         options = Options.new(combinations: [1], depth: 2, max_combinations: 1_u64)
         input = ["a", "b"]
         output_lines = run_and_read(options, input)

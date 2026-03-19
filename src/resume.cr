@@ -1,12 +1,21 @@
+require "json"
+
 module Worcestershire
   class ResumeState
+    include JSON::Serializable
+
     property last_word : String?
     property combinations_done : Array(Int32)
     property position : UInt64
-    property timestamp : Time
+    # Stored as an ISO-8601 string because Time is not directly JSON::Serializable.
+    property timestamp : String
 
-    def initialize(@last_word = nil, @combinations_done = [] of Int32, @position = 0_u64)
-      @timestamp = Time.utc
+    def initialize(
+      @last_word = nil,
+      @combinations_done = [] of Int32,
+      @position = 0_u64,
+    )
+      @timestamp = Time.utc.to_s("%Y-%m-%dT%H:%M:%SZ")
     end
 
     def save(path : String)
@@ -15,28 +24,9 @@ module Worcestershire
 
     def self.load(path : String) : ResumeState?
       return nil unless File.exists?(path)
-      data = File.read(path)
-      from_json(data)
+      from_json(File.read(path))
     rescue
       nil
-    end
-
-    def to_json : String
-      {
-        last_word:         @last_word,
-        combinations_done: @combinations_done,
-        position:          @position,
-        timestamp:         @timestamp.to_s("%Y-%m-%d %H:%M:%S UTC"),
-      }.to_json
-    end
-
-    def self.from_json(json : String) : ResumeState
-      parsed = JSON.parse(json)
-      new(
-        parsed["last_word"]?.try(&.as_s),
-        parsed["combinations_done"]?.try(&.as_a.map(&.as_i)) || [] of Int32,
-        parsed["position"]?.try(&.as_i.to_u64) || 0_u64
-      )
     end
   end
 end

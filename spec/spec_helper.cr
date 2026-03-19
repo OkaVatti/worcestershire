@@ -5,11 +5,13 @@ require "../src/worcestershire"
 # Helper to create a temporary file and yield its path, ensuring cleanup.
 def with_tempfile(prefix = "test", suffix = "", &block : String ->)
   file = File.tempfile(prefix, suffix)
+  path = file.path
+  # Close the tempfile handle immediately so the block can open the path freely.
+  file.close
   begin
-    yield file.path
+    yield path
   ensure
-    file.close
-    File.delete(file.path) if File.exists?(file.path)
+    File.delete(path) if File.exists?(path)
   end
 end
 
@@ -21,43 +23,43 @@ def with_temp_wordlist(lines : Array(String), &block : String ->)
   end
 end
 
-# Helper to capture stdout for testing code that does not exit.
-# This manually redirects STDOUT to a pipe, captures the output, and restores it.
-def with_captured_stdout(&block)
+# Captures all output written to STDOUT during the block and returns it as a
+# String.  The write end of the pipe is kept open until after the block
+# returns, then closed to signal EOF to the reader.
+def with_captured_stdout(&block) : String
   read_pipe, write_pipe = IO.pipe
   original_stdout = STDOUT.dup
-  STDOUT.reopen(write_pipe)
-  write_pipe.close
-
-  yield
-
-  STDOUT.reopen(original_stdout)
-  original_stdout.close
-  read_pipe.gets_to_end
-ensure
-  read_pipe.close if read_pipe
-  write_pipe.close if write_pipe
-  original_stdout.close if original_stdout
+  begin
+    STDOUT.reopen(write_pipe)
+    yield
+    STDOUT.flush
+  ensure
+    STDOUT.reopen(original_stdout)
+    write_pipe.close
+  end
+  output = read_pipe.gets_to_end
+  read_pipe.close
+  output
 end
 
-def with_captured_stderr(&block)
+# Same as with_captured_stdout but for STDERR.
+def with_captured_stderr(&block) : String
   read_pipe, write_pipe = IO.pipe
   original_stderr = STDERR.dup
-  STDERR.reopen(write_pipe)
-  write_pipe.close
-
-  yield
-
-  STDERR.reopen(original_stderr)
-  original_stderr.close
-  read_pipe.gets_to_end
-ensure
-  read_pipe.close if read_pipe
-  write_pipe.close if write_pipe
-  original_stderr.close if original_stderr
+  begin
+    STDERR.reopen(write_pipe)
+    yield
+    STDERR.flush
+  ensure
+    STDERR.reopen(original_stderr)
+    write_pipe.close
+  end
+  output = read_pipe.gets_to_end
+  read_pipe.close
+  output
 end
 
-# Run the CLI in a separate process using `crystal run`.
+# Run the CLI in a separate process.
 # Returns a named tuple with :status (Bool), :output (String), :error (String).
 def run_cli(args : Array(String))
   cmd = ["crystal", "run", "src/worcestershire.cr", "--"] + args
