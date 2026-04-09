@@ -49,7 +49,7 @@ jobs:
           restore-keys: ${{ runner.os }}-shards-
 
       - name: Install dependencies
-        run: shards install --frozen
+        run: shards install
 
       # Run every spec file except the binary integration file, which
       # requires a compiled binary and runs in the integration job below.
@@ -169,7 +169,7 @@ jobs:
           key: ubuntu-shards-lint-${{ hashFiles('shard.lock') }}
 
       - name: Install dependencies
-        run: shards install --frozen
+        run: shards install
 
       - name: Run ameba
         run: bin/ameba --no-color
