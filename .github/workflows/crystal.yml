@@ -123,7 +123,7 @@ jobs:
           restore-keys: ${{ runner.os }}-shards-
 
       - name: Install dependencies
-        run: shards install --frozen
+        run: shards install
 
       - name: Build release binary
         run: shards build --release --no-debug
