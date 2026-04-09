@@ -1,4 +1,3 @@
-# src/generator.cr
 require "channel"
 require "compress/gzip"
 require "json"
@@ -11,6 +10,10 @@ require "./resume"
 require "./cache"
 require "./worker_pool"
 require "./logger"
+require "./transforms"
+require "./bloom_filter"
+require "./pipeline"
+require "./pattern"
 
 module Worcestershire
   class Generator
@@ -20,15 +23,22 @@ module Worcestershire
     @filtered : UInt64
     @start_time : Time
     @channel : Channel(String)
-    # Dedicated channel for signalling that a producer fiber is done.
     @done_channel : Channel(Nil)
     @rules_engine : RuleEngine?
-    @affixes : Array(String)
     @logger : Logger
     @cache : LRUCache(String, String)
     @pool : WorkerPool?
     @resume_state : ResumeState?
     @mutex : Mutex
+    # Custom dictionaries (loaded from files or defaulting to constants)
+    @homograph_dict : Hash(Char, Array(String))
+    @leet_dict : Hash(Char, Array(String))
+    @salt_dict : Array(String)
+    @affixes : Array(String)
+    @date_strings : Array(String)
+    # Optional features
+    @dedup_filter : BloomFilter?
+    @output_delimiter : String
 
     def initialize(@options, @words)
       @total_generated = 0_u64
@@ -36,10 +46,8 @@ module Worcestershire
       @start_time = Time.utc
       @channel = Channel(String).new(10_000)
       @done_channel = Channel(Nil).new
-      @affixes = DEFAULT_AFFIXES.dup
-      if (rule_file = @options.rule_file)
-        @rules_engine = RuleEngine.new(rule_file)
-      end
+      @output_delimiter = @options.output_delimiter
+      @mutex = Mutex.new
 
       log_io = if (log_file = @options.log_file)
                  File.open(log_file, "a")
@@ -54,17 +62,29 @@ module Worcestershire
                   when "error" then LogLevel::Error
                   else              LogLevel::Info
                   end
+
       @logger = Logger.new(level: log_level, io: log_io)
       @cache = LRUCache(String, String).new(@options.cache_size)
       @pool = WorkerPool.new(@options.workers) if @options.parallel
-      @mutex = Mutex.new
+
+      @dedup_filter = BloomFilter.new if @options.deduplicate
+
+      @homograph_dict = load_subst_dict(@options.homograph_dict) || HOMOGRAPH_DICT
+      @leet_dict = load_subst_dict(@options.leet_dict) || LEET_DICT
+      @salt_dict = load_line_list(@options.salt_dict) || SALT_DICT.dup
+      @affixes = load_line_list(@options.affix_dict) || DEFAULT_AFFIXES.dup
+      @date_strings = DATE_STRINGS.dup
+
+      if rule_file = @options.rule_file
+        @rules_engine = RuleEngine.new(rule_file)
+      end
 
       if resume_file = @options.resume
         @resume_state = ResumeState.load(resume_file)
         if state = @resume_state
           @logger.info("Resuming from state saved at #{state.timestamp}")
         else
-          @logger.warn("Resume file not found or invalid, starting fresh")
+          @logger.warn("Resume file not found or invalid; starting fresh")
         end
       end
     end
@@ -90,13 +110,77 @@ module Worcestershire
 
       setup_signal_handler
 
-      if @options.combinations.empty?
-        @logger.info("No combinations selected - using base words only")
+      if pattern = @options.pattern
+        run_pattern_mode(pattern)
+      elsif pipeline_steps = @options.pipeline
+        run_pipeline_mode(pipeline_steps)
+      elsif @options.combinations.empty?
+        @logger.info("No combinations selected; writing base words only")
         process_words(@words)
       else
         generate_concurrent
       end
     end
+
+    # -------------------------------------------------------------------------
+    # Pipeline mode
+    # -------------------------------------------------------------------------
+
+    private def run_pipeline_mode(steps : Array(Int32))
+      invalid = steps.reject { |s| TransformPipeline.valid_step?(s) }
+      unless invalid.empty?
+        @logger.warn("Pipeline step(s) #{invalid.join(", ")} require multiple words and will be skipped")
+      end
+      valid_steps = steps.select { |s| TransformPipeline.valid_step?(s) }
+
+      pipeline = TransformPipeline.new(valid_steps,
+        @homograph_dict, @leet_dict,
+        @salt_dict, @affixes, @date_strings)
+      generated = 0_u64
+      max_comb = @options.max_combinations
+
+      open_output_io do |io|
+        pipeline.run(@words) do |word|
+          break if max_comb && generated >= max_comb
+          next unless valid_length?(word)
+          if f = @dedup_filter
+            next unless f.insert_new?(word)
+          end
+          write_word(io, apply_encoding(word))
+          generated += 1
+        end
+      end
+
+      @total_generated = generated
+      print_summary unless @options.quiet
+    end
+
+    # -------------------------------------------------------------------------
+    # Pattern mode
+    # -------------------------------------------------------------------------
+
+    private def run_pattern_mode(pattern : String)
+      pg = PatternGenerator.new(@words, @options.max_combinations)
+      generated = 0_u64
+
+      open_output_io do |io|
+        pg.generate(pattern) do |word|
+          next unless valid_length?(word)
+          if f = @dedup_filter
+            next unless f.insert_new?(word)
+          end
+          write_word(io, apply_encoding(word))
+          generated += 1
+        end
+      end
+
+      @total_generated = generated
+      print_summary unless @options.quiet
+    end
+
+    # -------------------------------------------------------------------------
+    # Combination mode (concurrent)
+    # -------------------------------------------------------------------------
 
     private def setup_signal_handler
       Signal::INT.trap do
@@ -113,7 +197,6 @@ module Worcestershire
     private def generate_concurrent
       total_estimate = estimate_total_combinations
 
-      # Launch one producer fiber per combination type.
       @options.combinations.each do |combo_type|
         if pool = @pool
           pool.schedule { produce(combo_type) }
@@ -122,21 +205,13 @@ module Worcestershire
         end
       end
 
-      # Launch the consumer fiber.
       spawn { consume_results(total_estimate) }
 
-      # Wait for all producers to signal completion via @done_channel.
       @options.combinations.size.times { @done_channel.receive }
-
-      # All producers are done; close the word channel so the consumer can drain
-      # any remaining items and then exit its loop.
       @channel.close
-
-      # Shutdown pool if used.
       @pool.try(&.shutdown)
     end
 
-    # Wrapper that signals the done channel after each producer finishes.
     private def produce(combo_type : Int32)
       generate_combinations(combo_type)
     ensure
@@ -145,25 +220,27 @@ module Worcestershire
 
     private def generate_combinations(combo_type : Int32)
       case combo_type
-      when 1 then word_mix_combinations
-      when 2 then case_alternate_combinations
-      when 3 then homograph_combinations
-      when 4 then reverse_combinations
-      when 5 then saltify_combinations
-      when 6 then leet_combinations
-      when 7 then separator_combinations
-      when 8 then affix_combinations
+      when  1 then word_mix_combinations
+      when  2 then case_alternate_combinations
+      when  3 then homograph_combinations
+      when  4 then reverse_combinations
+      when  5 then saltify_combinations
+      when  6 then leet_combinations
+      when  7 then separator_combinations
+      when  8 then affix_combinations
+      when  9 then keyboard_walk_combinations
+      when 10 then date_variation_combinations
       else
         @logger.debug("Unknown combination type: #{combo_type}")
       end
     end
 
     private def word_mix_combinations
-      @logger.debug("Generating word mixes with depth #{@options.depth}")
-      (2..@options.depth).each do |current_depth|
-        next if @words.size < current_depth
-        @words.each_permutation(current_depth) do |perm|
-          send_word(perm.join)
+      @logger.debug("Generating word mix (depth #{@options.depth}, delimiter: #{@output_delimiter.inspect})")
+      (2..@options.depth).each do |d|
+        next if @words.size < d
+        @words.each_permutation(d) do |perm|
+          send_word(perm.join(@output_delimiter))
         end
       end
     end
@@ -171,50 +248,41 @@ module Worcestershire
     private def case_alternate_combinations
       @logger.debug("Generating case alternations")
       @words.each do |word|
-        if word.size <= 10
-          generate_case_variations(word).each { |w| send_word(w) }
-        else
-          send_word(word.upcase)
-          send_word(word.downcase)
-          send_word(word.capitalize)
-        end
+        Transforms.case_variants(word).each { |w| send_word(w) }
       end
     end
 
     private def homograph_combinations
       @logger.debug("Generating homograph substitutions")
       @words.each do |word|
-        generate_homographs(word).each { |w| send_word(w) }
+        Transforms.homograph_variants(word, @homograph_dict).each { |w| send_word(w) }
       end
     end
 
     private def reverse_combinations
       @logger.debug("Generating reversed words")
-      @words.each { |word| send_word(word.reverse) }
+      @words.each { |word| send_word(Transforms.reverse_variant(word)) }
     end
 
     private def saltify_combinations
       @logger.debug("Applying salt dictionary")
       @words.each do |word|
-        SALT_DICT.each do |salt|
-          send_word(salt + word)
-          send_word(word + salt)
-        end
+        Transforms.saltify_variants(word, @salt_dict).each { |w| send_word(w) }
       end
     end
 
     private def leet_combinations
-      @logger.debug("Generating leet (1337) substitutions")
+      @logger.debug("Generating leet substitutions")
       @words.each do |word|
-        generate_leet(word).each { |w| send_word(w) }
+        Transforms.leet_variants(word, @leet_dict).each { |w| send_word(w) }
       end
     end
 
     private def separator_combinations
       @logger.debug("Generating separator insertions")
-      (2..3).each do |current_depth|
-        next if @words.size < current_depth
-        @words.each_permutation(current_depth) do |perm|
+      (2..3).each do |d|
+        next if @words.size < d
+        @words.each_permutation(d) do |perm|
           SEPARATORS.each do |sep|
             send_word(perm.join(sep))
           end
@@ -223,22 +291,37 @@ module Worcestershire
     end
 
     private def affix_combinations
-      @logger.debug("Applying prefix/suffix")
+      @logger.debug("Applying affixes")
       @words.each do |word|
-        @affixes.each do |affix|
-          send_word(affix + word)
-          send_word(word + affix)
-        end
+        Transforms.affix_variants(word, @affixes).each { |w| send_word(w) }
       end
     end
 
-    # --- Helper: send a word through the pipeline ---
+    private def keyboard_walk_combinations
+      @logger.debug("Generating keyboard-walk variants")
+      @words.each do |word|
+        Transforms.keyboard_variants(word).each { |w| send_word(w) }
+      end
+    end
+
+    private def date_variation_combinations
+      @logger.debug("Generating date variation variants")
+      @words.each do |word|
+        Transforms.date_variants(word, @date_strings).each { |w| send_word(w) }
+      end
+    end
+
+    # -------------------------------------------------------------------------
+    # Word dispatch
+    # -------------------------------------------------------------------------
 
     private def send_word(word : String)
       return unless valid_length?(word)
 
-      # Resume: skip words whose position index is strictly less than the
-      # saved position (i.e. they were already generated in a prior run).
+      if f = @dedup_filter
+        return unless f.insert_new?(word)
+      end
+
       @mutex.synchronize do
         if (state = @resume_state) && @total_generated < state.position
           @total_generated += 1
@@ -260,7 +343,9 @@ module Worcestershire
 
       @mutex.synchronize do
         @total_generated += 1
-        if (resume_path = @options.resume) && (state = @resume_state) && @total_generated % 10_000 == 0
+        if (resume_path = @options.resume) &&
+           (state = @resume_state) &&
+           @total_generated % 10_000 == 0
           state.last_word = word
           state.position = @total_generated
           state.save(resume_path)
@@ -269,82 +354,25 @@ module Worcestershire
       end
     end
 
-    # --- Variation generators ---
-
-    private def generate_case_variations(word : String) : Array(String)
-      variations = [] of String
-      (0...2**word.size).each do |mask|
-        variant = word.chars.map_with_index do |c, i|
-          mask.bit(i) == 1 ? c.upcase : c.downcase
-        end.join
-        variations << variant
-      end
-      variations.uniq
-    end
-
-    # Generates homograph substitutions positionally: for each character that
-    # has substitutions, produce new variants by replacing that single position
-    # across all existing variants.
-    private def generate_homographs(word : String) : Array(String)
-      variants = [word]
-      word.chars.each_with_index do |char, idx|
-        next unless subs = HOMOGRAPH_DICT[char]?
-        new_variants = [] of String
-        subs.each do |sub|
-          variants.each do |var|
-            chars = var.chars
-            chars[idx] = sub[0] # sub is a String; take first char-equivalent
-            new_variants << chars.join
-          end
-        end
-        variants.concat(new_variants)
-      end
-      variants.uniq
-    end
-
-    private def generate_leet(word : String) : Array(String)
-      variants = [word]
-      word.chars.each_with_index do |char, idx|
-        next unless subs = LEET_DICT[char]?
-        new_variants = [] of String
-        subs.each do |sub|
-          variants.each do |var|
-            chars = var.chars
-            chars[idx] = sub[0]
-            new_variants << chars.join
-          end
-        end
-        variants.concat(new_variants)
-      end
-      variants.uniq
-    end
-
-    # --- Consumer ---
+    # -------------------------------------------------------------------------
+    # Consumer
+    # -------------------------------------------------------------------------
 
     private def consume_results(total_estimate : UInt64)
-      ticks_for_progress = total_estimate.clamp(0_u64, Int32::MAX.to_u64).to_i32
-      progress = ProgressWrapper.new(ticks_for_progress, !@options.no_progress && !@options.quiet && !@options.verbose)
+      ticks = total_estimate.clamp(0_u64, Int32::MAX.to_u64).to_i32
+      progress = ProgressWrapper.new(ticks, !@options.no_progress && !@options.quiet && !@options.verbose)
       progress.init("Generating wordlist...")
 
       generated = 0_u64
 
-      open_output_io do |output_io|
-        # Drain the channel until it is closed and empty.
+      open_output_io do |io|
         while result = @channel.receive?
-          encoded = apply_encoding(result)
-          case @options.format
-          when "json"
-            output_io.puts({word: encoded}.to_json)
-          when "hashcat"
-            output_io.puts encoded
-          else
-            output_io.puts encoded
-          end
+          write_word(io, apply_encoding(result))
           generated += 1
           progress.tick
 
           if (max_comb = @options.max_combinations) && generated >= max_comb
-            @logger.info("Reached maximum combinations limit (#{max_comb}). Stopping.")
+            @logger.info("Reached max-combinations limit (#{max_comb}). Stopping.")
             break
           end
         end
@@ -355,7 +383,9 @@ module Worcestershire
       print_summary
     end
 
-    # --- Base-word processor (no combinations selected) ---
+    # -------------------------------------------------------------------------
+    # Base-word processor (no combinations)
+    # -------------------------------------------------------------------------
 
     private def process_words(words : Array(String))
       progress = ProgressWrapper.new(words.size, !@options.no_progress && !@options.quiet && !@options.verbose)
@@ -364,18 +394,10 @@ module Worcestershire
       generated = 0_u64
       filtered = 0_u64
 
-      open_output_io do |output_io|
+      open_output_io do |io|
         words.each do |word|
           if valid_length?(word)
-            encoded = apply_encoding(word)
-            case @options.format
-            when "json"
-              output_io.puts({word: encoded}.to_json)
-            when "hashcat"
-              output_io.puts encoded
-            else
-              output_io.puts encoded
-            end
+            write_word(io, apply_encoding(word))
             generated += 1
           else
             filtered += 1
@@ -390,7 +412,19 @@ module Worcestershire
       print_summary
     end
 
-    # Block form: yields the IO and ensures it is closed regardless of errors.
+    # -------------------------------------------------------------------------
+    # Output helpers
+    # -------------------------------------------------------------------------
+
+    private def write_word(io : IO, word : String)
+      case @options.format
+      when "json"
+        io.puts({word: word}.to_json)
+      else
+        io.puts word
+      end
+    end
+
     private def open_output_io(& : IO ->)
       File.open(@options.output_file, "w") do |file|
         if @options.compress
@@ -403,7 +437,9 @@ module Worcestershire
       end
     end
 
-    # --- Utilities ---
+    # -------------------------------------------------------------------------
+    # Utilities
+    # -------------------------------------------------------------------------
 
     private def valid_length?(word : String) : Bool
       word.size >= @options.min_length && word.size <= @options.max_length
@@ -423,14 +459,16 @@ module Worcestershire
       total = 0_u64
       @options.combinations.each do |combo|
         case combo
-        when 1 then total += (@words.size ** (@options.depth - 1)).to_u64 * 100
-        when 2 then total += @words.sum(0_u64) { |w| 2_u64 ** [w.size, 10].min }
-        when 3 then total += @words.sum(0_u64) { |w| (HOMOGRAPH_DICT.values.sum(&.size) + 1).to_u64 }
-        when 4 then total += @words.size.to_u64
-        when 5 then total += @words.size.to_u64 * SALT_DICT.size.to_u64 * 2_u64
-        when 6 then total += @words.sum(0_u64) { |w| (LEET_DICT.values.sum(&.size) + 1).to_u64 }
-        when 7 then total += @words.size.to_u64 * @words.size.to_u64 * SEPARATORS.size.to_u64
-        when 8 then total += @words.size.to_u64 * @affixes.size.to_u64 * 2_u64
+        when  1 then total += (@words.size ** (@options.depth - 1)).to_u64 * 100
+        when  2 then total += @words.sum(0_u64) { |w| 2_u64 ** [w.size, 10].min }
+        when  3 then total += @words.sum(0_u64) { |w| (HOMOGRAPH_DICT.values.sum(&.size) + 1).to_u64 }
+        when  4 then total += @words.size.to_u64
+        when  5 then total += @words.size.to_u64 * @salt_dict.size.to_u64 * 2_u64
+        when  6 then total += @words.sum(0_u64) { |w| (LEET_DICT.values.sum(&.size) + 1).to_u64 }
+        when  7 then total += @words.size.to_u64 * @words.size.to_u64 * SEPARATORS.size.to_u64
+        when  8 then total += @words.size.to_u64 * @affixes.size.to_u64 * 2_u64
+        when  9 then total += @words.sum(0_u64) { |w| w.size.to_u64 * 4_u64 }
+        when 10 then total += @words.size.to_u64 * @date_strings.size.to_u64 * 2_u64
         end
       end
       total == 0_u64 ? 1_u64 : total
@@ -441,27 +479,62 @@ module Worcestershire
       puts "" unless @options.quiet
       if @options.no_color
         puts "=== Summary ==="
-        puts "Total generated: #{@total_generated}"
-        puts "Filtered (length constraints): #{@filtered}"
-        puts "Time elapsed: #{elapsed.total_seconds.round(2)}s"
+        puts "Total generated            : #{@total_generated}"
+        puts "Filtered (length/dedup)    : #{@filtered}"
+        puts "Time elapsed               : #{elapsed.total_seconds.round(2)}s"
       else
         puts "=== Summary ===".colorize(:green).bold
-        puts "Total generated: #{@total_generated}".colorize(:yellow)
-        puts "Filtered (length constraints): #{@filtered}".colorize(:yellow)
-        puts "Time elapsed: #{elapsed.total_seconds.round(2)}s".colorize(:yellow)
+        puts "Total generated            : #{@total_generated}".colorize(:yellow)
+        puts "Filtered (length/dedup)    : #{@filtered}".colorize(:yellow)
+        puts "Time elapsed               : #{elapsed.total_seconds.round(2)}s".colorize(:yellow)
       end
     end
 
     private def monitor_memory(limit : UInt64)
       loop do
         sleep 5.seconds
-        # GC::Stats#heap_size is the correct field in Crystal 1.19.1.
         used = GC.stats.heap_size
         if used > limit
           @logger.error("Memory limit exceeded (#{used} > #{limit}). Aborting.")
           exit 1
         end
       end
+    end
+
+    # -------------------------------------------------------------------------
+    # Custom dictionary loaders
+    # -------------------------------------------------------------------------
+
+    # Parses a substitution dict file in the format:
+    #   a->@,4,α
+    #   e->3,€
+    # Returns nil if *path* is nil; raises a logged warning on any error.
+    private def load_subst_dict(path : String?) : Hash(Char, Array(String))?
+      return nil unless path
+      dict = {} of Char => Array(String)
+      File.each_line(path) do |line|
+        line = line.strip
+        next if line.empty? || line.starts_with?('#')
+        if m = line.match(/^(.)\s*->\s*(.+)$/)
+          char = m[1][0]
+          subs = m[2].split(',').map(&.strip).reject(&.empty?)
+          dict[char] = subs unless subs.empty?
+        end
+      end
+      dict
+    rescue e
+      @logger.warn("Could not load substitution dictionary #{path}: #{e.message}")
+      nil
+    end
+
+    # Parses a simple one-entry-per-line list file.
+    # Returns nil if *path* is nil.
+    private def load_line_list(path : String?) : Array(String)?
+      return nil unless path
+      File.read_lines(path).map(&.strip).reject(&.empty?)
+    rescue e
+      @logger.warn("Could not load list file #{path}: #{e.message}")
+      nil
     end
   end
 end

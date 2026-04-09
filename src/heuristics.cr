@@ -3,29 +3,51 @@ module Worcestershire
     extend self
 
     def suggest_combinations(words : Array(String)) : Array(Int32)
+      return [] of Int32 if words.empty?
+
       suggestions = [] of Int32
 
-      # Check for digits -> suggest leet and saltify
+      # Digit presence -> leet and saltify
       if words.any? { |w| w =~ /\d/ }
-        suggestions << 6 # leet
-        suggestions << 5 # saltify
+        suggestions << 6
+        suggestions << 5
       end
 
-      # Check for mixed case -> suggest case alternate
+      # Mixed case -> case alternate
       if words.any? { |w| w =~ /[A-Z]/ && w =~ /[a-z]/ }
-        suggestions << 2 # case alternate
+        suggestions << 2
       end
 
-      # Check for long words (>8 chars) -> suggest word mix
+      # Multiple words -> word mix and separator
+      if words.size >= 2
+        suggestions << 1
+        suggestions << 7
+      end
+
+      # Long words (> 8 chars) -> reverser (long reversals are distinct)
       if words.any? { |w| w.size > 8 }
-        suggestions << 1 # word mix
+        suggestions << 4
       end
 
-      # Always include common useful combos
-      suggestions << 3 # homograph
-      suggestions << 4 # reverser
-      suggestions << 7 # separator
-      suggestions << 8 # affix
+      # Words with ASCII letters that have keyboard neighbours -> keyboard walk
+      if words.any? { |w| w =~ /[a-zA-Z]/ }
+        suggestions << 9
+      end
+
+      # Pure-alpha words (likely names/dictionary words) -> homograph and affix
+      if words.all? { |w| w =~ /^[a-zA-Z]+$/ }
+        suggestions << 3
+        suggestions << 8
+      end
+
+      # Short words (all <= 6 chars) -> date variation is effective
+      avg_len = words.sum(0) { |w| w.size } / words.size
+      if avg_len <= 6
+        suggestions << 10
+      end
+
+      # Always include common catches not yet added
+      [3, 4, 8].each { |t| suggestions << t unless suggestions.includes?(t) }
 
       suggestions.uniq.sort
     end

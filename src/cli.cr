@@ -1,113 +1,14 @@
 require "option_parser"
-require "yaml"
+require "colorize"
+require "./options"
 require "./dictionaries"
 require "./encodings"
 require "./utils"
-require "./wizard"
 require "./presets"
 require "./heuristics"
+require "./pipeline"
 
 module Worcestershire
-  class Options
-    property words : Array(String)
-    property input_files : Array(String)
-    property output_file : String
-    property combinations : Array(Int32)
-    property depth : Int32
-    property min_length : Int32
-    property max_length : Int32
-    property encoding : String?
-    property verbose : Bool
-    property no_progress : Bool
-    property list_combinations : Bool
-    property format : String
-    property compress : Bool
-    property config_file : String?
-    property max_combinations : UInt64?
-    property rule_file : String?
-    property resume : String?
-    property log_file : String?
-    property log_level : String = "info"
-    property buffer_size : Int32 = 1_048_576
-    property no_color : Bool = false
-    property force : Bool = false
-    property dry_run : Bool = false
-    property quiet : Bool = false
-    property preset : String?
-    property suggest : Bool = false
-    property homograph_dict : String?
-    property leet_dict : String?
-    property salt_dict : String?
-    property affix_dict : String?
-    property parallel : Bool = false
-    property workers : Int32 = 4
-    property cache_size : Int32 = 1000
-    property max_memory : UInt64?
-
-    def initialize(
-      @words = [] of String,
-      @input_files = [] of String,
-      @output_file = "output.lst",
-      @combinations = [] of Int32,
-      @depth = 3,
-      @min_length = 0,
-      @max_length = 20,
-      @encoding = nil,
-      @verbose = false,
-      @no_progress = false,
-      @list_combinations = false,
-      @format = "txt",
-      @compress = false,
-      @config_file = nil,
-      @max_combinations = nil,
-      @rule_file = nil,
-      @resume = nil,
-      @log_file = nil,
-      @log_level = "info",
-      @buffer_size = 1_048_576,
-      @no_color = false,
-      @force = false,
-      @dry_run = false,
-      @quiet = false,
-      @preset = nil,
-      @suggest = false,
-      @homograph_dict = nil,
-      @leet_dict = nil,
-      @salt_dict = nil,
-      @affix_dict = nil,
-      @parallel = false,
-      @workers = 4,
-      @cache_size = 1000,
-      @max_memory = nil,
-    )
-    end
-
-    def load_config!
-      return unless config = @config_file
-      begin
-        yaml = File.open(config) { |f| YAML.parse(f) }
-        if h = yaml.as_h?
-          @depth = h["depth"]?.try(&.as_i) || @depth
-          @min_length = h["min_length"]?.try(&.as_i) || @min_length
-          @max_length = h["max_length"]?.try(&.as_i) || @max_length
-          @format = h["format"]?.try(&.as_s) || @format
-          @compress = h["compress"]?.try(&.as_bool) || @compress
-          @max_combinations = h["max_combinations"]?.try(&.as_i.to_u64) || @max_combinations
-          @buffer_size = h["buffer_size"]?.try(&.as_i) || @buffer_size
-          @workers = h["workers"]?.try(&.as_i) || @workers
-          @cache_size = h["cache_size"]?.try(&.as_i) || @cache_size
-          @max_memory = h["max_memory"]?.try(&.as_i.to_u64) || @max_memory
-          if combos = h["combinations"]?.try(&.as_a)
-            @combinations = combos.map(&.as_i) if @combinations.empty?
-          end
-        end
-      rescue e
-        Utils.print_error("Failed to load config: #{e.message}")
-        exit(1)
-      end
-    end
-  end
-
   class CLI
     @options : Options
 
@@ -119,16 +20,16 @@ module Worcestershire
       OptionParser.parse do |parser|
         parser.banner = "Usage: worcestershire [arguments]"
 
-        # ===== Input =====
+        # Input
         parser.on("-w WORDS", "--words WORDS", "Space-separated words to process") do |words|
           @options.words = words.split
         end
 
-        parser.on("-i FILE", "--input FILE", "Input file (can be used multiple times)") do |file|
+        parser.on("-i FILE", "--input FILE", "Input file (repeatable)") do |file|
           @options.input_files << file
         end
 
-        # ===== Output =====
+        # Output
         parser.on("-o FILE", "--output FILE", "Output file (default: output.lst)") do |file|
           @options.output_file = file
         end
@@ -141,11 +42,11 @@ module Worcestershire
           @options.compress = true
         end
 
-        parser.on("--force", "Overwrite output file without prompting") do
+        parser.on("--force", "Overwrite output without prompting") do
           @options.force = true
         end
 
-        parser.on("--dry-run", "Only estimate size, do not generate") do
+        parser.on("--dry-run", "Estimate size only; do not generate") do
           @options.dry_run = true
         end
 
@@ -153,8 +54,8 @@ module Worcestershire
           @options.quiet = true
         end
 
-        # ===== Combinations =====
-        parser.on("-c COMBOS", "--combination COMBOS", "Combination types (1-8, space-separated)") do |combos|
+        # Combinations
+        parser.on("-c COMBOS", "--combination COMBOS", "Combination types (1-10, space-separated)") do |combos|
           @options.combinations = combos.split.map(&.to_i)
         end
 
@@ -162,11 +63,11 @@ module Worcestershire
           @options.depth = depth.to_i.clamp(2, 5)
         end
 
-        parser.on("-m MIN", "--min MIN", "Minimum output length (0-49)") do |min|
+        parser.on("-m MIN", "--min MIN", "Minimum output length") do |min|
           @options.min_length = min.to_i.clamp(0, 49)
         end
 
-        parser.on("-M MAX", "--max MAX", "Maximum output length (1-50)") do |max|
+        parser.on("-M MAX", "--max MAX", "Maximum output length") do |max|
           @options.max_length = max.to_i.clamp(1, 50)
         end
 
@@ -174,12 +75,12 @@ module Worcestershire
           validate_encoding(enc)
         end
 
-        # ===== Advanced =====
-        parser.on("--max-combinations N", "Stop after generating N combinations") do |n|
+        # Advanced
+        parser.on("--max-combinations N", "Stop after N combinations") do |n|
           @options.max_combinations = n.to_u64
         end
 
-        parser.on("--rules FILE", "Apply custom transformation rules") do |file|
+        parser.on("--rules FILE", "Apply JTR-style rule file") do |file|
           @options.rule_file = file
         end
 
@@ -199,7 +100,7 @@ module Worcestershire
           @options.buffer_size = bytes.to_i
         end
 
-        parser.on("--no-color", "Disable colored output") do
+        parser.on("--no-color", "Disable coloured output") do
           @options.no_color = true
         end
 
@@ -211,15 +112,15 @@ module Worcestershire
           @options.workers = n.to_i
         end
 
-        parser.on("--cache-size N", "Encoding cache size (default: 1000)") do |n|
+        parser.on("--cache-size N", "Encoding LRU cache size (default: 1000)") do |n|
           @options.cache_size = n.to_i
         end
 
-        parser.on("--max-memory BYTES", "Maximum memory usage in bytes (e.g., 1073741824 for 1GB)") do |bytes|
+        parser.on("--max-memory BYTES", "Abort if heap exceeds N bytes") do |bytes|
           @options.max_memory = bytes.to_u64
         end
 
-        # ===== Custom dictionaries =====
+        # Custom dictionaries
         parser.on("--homograph-dict FILE", "Custom homograph substitutions file") do |file|
           @options.homograph_dict = file
         end
@@ -236,22 +137,49 @@ module Worcestershire
           @options.affix_dict = file
         end
 
-        # ===== Config =====
-        # NOTE: this was missing in the original, causing --config to be silently ignored.
+        # Config
         parser.on("--config FILE", "Load options from a YAML config file") do |file|
           @options.config_file = file
         end
 
-        # ===== Helpful =====
-        parser.on("-l", "--list", "List combination types") do
+        # New feature flags
+        parser.on("--pipeline STEPS", "Chain transforms: comma-separated types (e.g. 2,6,5)") do |steps|
+          parsed = steps.split(',').map(&.strip.to_i)
+          invalid = parsed.reject { |s| TransformPipeline.valid_step?(s) }
+          unless invalid.empty?
+            Utils.print_error("Pipeline types #{invalid.join(", ")} are not valid single-word transforms. " \
+                              "Valid types: #{TransformPipeline::VALID_STEPS.to_a.sort.join(", ")}.")
+            exit 1
+          end
+          @options.pipeline = parsed
+        end
+
+        parser.on("--deduplicate", "Remove duplicate output words using a bloom filter") do
+          @options.deduplicate = true
+        end
+
+        parser.on("--output-delimiter STR", "Delimiter for Word Mix (type 1) joins (default: none)") do |str|
+          @options.output_delimiter = str
+        end
+
+        parser.on("--benchmark", "Run a built-in benchmark and report words/sec") do
+          @options.benchmark = true
+        end
+
+        parser.on("--pattern PATTERN", "Generate words from a typed pattern (e.g. ?w?d?d?d)") do |pat|
+          @options.pattern = pat
+        end
+
+        # Helpful
+        parser.on("-l", "--list", "List combination types and exit") do
           @options.list_combinations = true
         end
 
-        parser.on("--preset NAME", "Use predefined preset: password-cracking, username-enum, quick-test") do |name|
+        parser.on("--preset NAME", "Apply a named preset") do |name|
           @options.preset = name
         end
 
-        parser.on("--suggest", "Analyze input and suggest combinations") do
+        parser.on("--suggest", "Analyse input and suggest combination types") do
           @options.suggest = true
         end
 
@@ -263,27 +191,28 @@ module Worcestershire
           @options.no_progress = true
         end
 
-        parser.on("--examples", "Show usage examples") do
+        parser.on("--examples", "Print usage examples and exit") do
           print_examples
           exit 0
         end
 
-        parser.on("--explain COMBOS", "Explain combination types") do |combos|
+        parser.on("--explain COMBOS", "Explain selected combination types") do |combos|
           explain_combinations(combos.split.map(&.to_i))
           exit 0
         end
 
-        parser.on("--interactive", "Run interactive wizard") do
+        parser.on("--interactive", "Run interactive setup wizard") do
+          # Wizard is required by worcestershire.cr; instantiate directly.
           Wizard.new.run
           exit 0
         end
 
-        parser.on("-v", "--version", "Show version") do
+        parser.on("-v", "--version", "Print version and exit") do
           puts "Worcestershire v#{VERSION}"
           exit 0
         end
 
-        parser.on("-h", "--help", "Show help") do
+        parser.on("-h", "--help", "Print help and exit") do
           puts parser
           exit 0
         end
@@ -310,7 +239,7 @@ module Worcestershire
         exit 0
       end
 
-      validate_options
+      validate_options unless @options.benchmark || !@options.pattern.nil?
       @options
     end
 
@@ -337,7 +266,7 @@ module Worcestershire
       if @options.list_combinations
         puts "Combination Types:".colorize(:green).bold
         COMBINATION_TYPES.each do |num, desc|
-          puts "  #{num}. #{desc}"
+          puts "  #{num.to_s.rjust(2)}. #{desc}"
         end
         exit 0
       end
@@ -345,7 +274,7 @@ module Worcestershire
 
     private def validate_options
       if @options.words.empty? && @options.input_files.empty?
-        Utils.print_error("No words provided. Use -w or -i")
+        Utils.print_error("No words provided. Use -w or -i.")
         exit 1
       end
     end
@@ -361,27 +290,29 @@ module Worcestershire
         worcestershire -i base.txt --suggest
         worcestershire -i words.txt --preset password-cracking
         worcestershire --resume state.json --force
+        worcestershire -i words.txt --pipeline 2,6,5
+        worcestershire -i words.txt --pattern "?w?d?d?d?d"
+        worcestershire -i words.txt -c 1 2 3 --deduplicate
+        worcestershire -i words.txt -c 1 --output-delimiter "-"
+        worcestershire --benchmark
       EXAMPLES
     end
 
     private def explain_combinations(combos)
       puts "Explanation of selected combination types:".colorize(:green).bold
       combos.each do |c|
-        desc = COMBINATION_TYPES[c]?
-        if desc
-          case c
-          when 1 then puts "  1. Word Mix: Combines multiple words (e.g., 'pass' + 'word' = 'password'). Depth controls how many words are mixed."
-          when 2 then puts "  2. Case Alternate: Generates all case variations (e.g., 'Password', 'PASSWORD', 'pASSWORD')."
-          when 3 then puts "  3. Homograph: Substitutes characters with visually similar ones (e.g., 'a' -> '@', '4')."
-          when 4 then puts "  4. Reverser: Reverses words (e.g., 'drowssap')."
-          when 5 then puts "  5. Saltify: Adds common salts before/after words (e.g., '123password', 'password!')."
-          when 6 then puts "  6. Leet Speak: Applies leet substitutions (e.g., 'e' -> '3', 's' -> '5')."
-          when 7 then puts "  7. Separator Insert: Joins words with separators like '-', '_', '.'."
-          when 8 then puts "  8. Affix: Adds common prefixes and suffixes (e.g., '!', '?', '2024')."
-          else        puts "  #{c}: Unknown type"
-          end
-        else
-          puts "  #{c}: Not a valid combination type"
+        case c
+        when  1 then puts "   1. Word Mix: Concatenates permutations of input words up to --depth."
+        when  2 then puts "   2. Case Alternate: All case variants (Password, PASSWORD, pAsSWoRd, ...)."
+        when  3 then puts "   3. Homograph: Substitutes chars with visual look-alikes (a -> @, 4, α)."
+        when  4 then puts "   4. Reverser: Reverses each word (drowssap)."
+        when  5 then puts "   5. Saltify: Prepends/appends salt dictionary entries (123password, password!)."
+        when  6 then puts "   6. Leet Speak: Applies leet substitutions (e -> 3, s -> 5)."
+        when  7 then puts "   7. Separator Insert: Joins word pairs/triples with separators (pass-word)."
+        when  8 then puts "   8. Affix: Prepends/appends common affixes (!password, password2024)."
+        when  9 then puts "   9. Keyboard Walk: Substitutes each character with adjacent QWERTY keys."
+        when 10 then puts "  10. Date Variation: Appends/prepends date strings (password2024, 01012000password)."
+        else         puts "  #{c}: Unknown type"
         end
       end
     end

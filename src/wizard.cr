@@ -1,9 +1,9 @@
 require "colorize"
+require "./options"
 require "./dictionaries"
 require "./encodings"
 require "./utils"
 require "./generator"
-require "./cli"
 
 module Worcestershire
   class Wizard
@@ -17,26 +17,17 @@ module Worcestershire
       puts "\n=== Worcestershire Interactive Setup ===".colorize(:green).bold
       puts "Let's configure your wordlist generation step by step.\n"
 
-      # Step 1: Input words
       input_words
-      # Step 2: Combination types
       choose_combinations
-      # Step 3: Depth (if word mix selected)
       set_depth if @options.combinations.includes?(1)
-      # Step 4: Length filters
       set_length_filters
-      # Step 5: Encoding
       choose_encoding
-      # Step 6: Output settings
       set_output
-      # Step 7: Advanced options (config, rules, etc.)
       advanced_options
 
-      # Summary and confirmation
       print_summary
       if confirm_run
         puts "\nStarting generation...".colorize(:green)
-        # Delegate to generator
         words = load_words_interactive
         generator = Generator.new(@options, words)
         generator.run
@@ -76,7 +67,7 @@ module Worcestershire
       puts "\n[2/7] Combination types".colorize(:cyan)
       puts "Available combinations:"
       COMBINATION_TYPES.each do |num, desc|
-        puts "  #{num}. #{desc}"
+        puts "  #{num.to_s.rjust(2)}. #{desc}"
       end
       puts "Enter numbers (space-separated) or 'all' for all, 'none' for base words only:"
       print "> "
