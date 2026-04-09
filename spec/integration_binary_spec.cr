@@ -94,6 +94,7 @@ module Worcestershire
     it "no arguments prints a message and exits 0" do
       r = run_binary([] of String)
       r[:status].should be_true
+      r[:output].should contain("please provide an argument or option")
     end
 
     it "an invalid flag exits non-zero" do
@@ -129,10 +130,11 @@ module Worcestershire
   describe "--dry-run" do
     it "prints an estimate without creating an output file" do
       with_tempfile("out", ".lst") do |output|
+        File.delete(output) if File.exists?(output)
         with_word_input(["pass", "word"]) do |input|
-          r = run_binary(["-i", input, "-c", "1", "-d", "2", "--dry-run"])
+          r = run_binary(["-i", input, "-c", "1", "-d", "2", "-o", output, "--dry-run"])
           r[:status].should be_true
-          r[:output].should contain("Dry run")
+          (r[:output] + r[:error]).should contain("Dry run: estimated")
           File.exists?(output).should be_false
         end
       end
@@ -299,7 +301,7 @@ module Worcestershire
   describe "encoding modes" do
     {% for enc in %w[base64 base32 url hex md5 sha1 sha256 sha512] %}
       it "{{enc.id}} encodes output" do
-        with_word_input(["test"]) do |input|
+        with_word_input(["hello world"]) do |input|
           with_tempfile("out", ".lst") do |output|
             r = run_binary(["-i", input, "-e", {{enc}},
                             "-o", output, "--force", "--quiet"])
@@ -307,7 +309,7 @@ module Worcestershire
             # Output file should be non-empty and not equal the raw input
             content = File.read(output).strip
             content.should_not be_empty
-            content.should_not eq("test")
+            content.should_not eq("hello world")
           end
         end
       end
@@ -524,6 +526,7 @@ module Worcestershire
     it "rejects multi-word types (1, 7) in pipeline with non-zero exit" do
       r = run_binary(["-w", "test", "--pipeline", "1,2"])
       r[:status].should be_false
+      (r[:output] + r[:error]).should contain("Pipeline types 1 are not valid single-word transforms")
     end
 
     it "respects --max-combinations in pipeline mode" do
@@ -922,13 +925,7 @@ module Worcestershire
     it "loads options from a YAML config and respects them" do
       with_word_input(["pass"]) do |input|
         with_tempfile("config", ".yml") do |cfg|
-          File.write(cfg, <<-YAML)
-          min_length: 4
-          max_length: 6
-          format: txt
-          combinations:
-            - 4
-          YAML
+          File.write(cfg, "min_length: 4\nmax_length: 6\nformat: txt\ncombinations:\n  - 4\n")
           with_tempfile("out", ".lst") do |output|
             r = run_binary(["-i", input, "--config", cfg,
                             "-o", output, "--force", "--quiet"])
@@ -962,25 +959,21 @@ module Worcestershire
   # =========================================================================
 
   describe "--resume" do
-    it "resumes from where a previous run stopped" do
-      with_word_input(["a", "b", "c"]) do |input|
+    it "skips already-processed results when a saved state file is present" do
+      with_word_input(["abc", "def", "ghi"]) do |input|
         with_tempfile("state", ".json") do |state|
-          with_tempfile("out1", ".lst") do |out1|
-            # First run: stop after 2 combinations
-            run_binary(["-i", input, "-c", "1", "-d", "2",
-                        "--max-combinations", "2",
-                        "--resume", state,
-                        "-o", out1, "--force", "--quiet"])
-            File.read_lines(out1).size.should eq(2)
+          File.write(state, %({"last_word":"abc","combinations_done":[4],"position":1,"timestamp":"2024-01-01T00:00:00Z"}))
 
-            with_tempfile("out2", ".lst") do |out2|
-              # Second run: resume and collect remaining
-              r = run_binary(["-i", input, "-c", "1", "-d", "2",
-                              "--resume", state,
-                              "-o", out2, "--force", "--quiet"])
-              r[:status].should be_true
-              File.read_lines(out2).size.should be > 0
-            end
+          with_tempfile("out", ".lst") do |output|
+            r = run_binary(["-i", input, "-c", "4",
+                            "--resume", state,
+                            "-o", output, "--force", "--quiet"])
+            r[:status].should be_true
+
+            lines = File.read_lines(output)
+            lines.should_not contain("cba")
+            lines.should contain("fed")
+            lines.should contain("ihg")
           end
         end
       end
@@ -1036,9 +1029,9 @@ module Worcestershire
 
   describe "error conditions" do
     it "exits non-zero when no words or input file provided" do
-      r = run_binary(["-o", "out.lst", "--force", "--dry-run"])
+      r = run_binary(["-o", "out.lst", "--force"])
       r[:status].should be_false
-      (r[:output] + r[:error]).should contain("No words")
+      (r[:output] + r[:error]).should contain("No words provided. Use -w or -i.")
     end
 
     it "exits non-zero when input file does not exist" do
