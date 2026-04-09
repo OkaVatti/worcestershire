@@ -146,7 +146,7 @@ module Worcestershire
       it "does not raise for words with no adjacent-key characters" do
         # Only certain chars have entries in QWERTY_ADJACENT
         opts = Options.new(combinations: [9])
-        expect_raises?(Exception) do
+        expect_raises(Exception) do
           run_and_read(opts, ["12345"])
         end.should be_nil
       end
