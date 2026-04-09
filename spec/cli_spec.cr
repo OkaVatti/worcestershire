@@ -217,11 +217,6 @@ module Worcestershire
         result[:output].should contain("Explanation")
       end
 
-      it "parses --interactive" do
-        result = run_cli(["--interactive"])
-        result[:status].should be_true
-      end
-
       it "parses -v --version" do
         result = run_cli(["-v"])
         result[:status].should be_true

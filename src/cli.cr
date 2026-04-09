@@ -201,12 +201,6 @@ module Worcestershire
           exit 0
         end
 
-        parser.on("--interactive", "Run interactive setup wizard") do
-          # Wizard is required by worcestershire.cr; instantiate directly.
-          Wizard.new.run
-          exit 0
-        end
-
         parser.on("-v", "--version", "Print version and exit") do
           puts "Worcestershire v#{VERSION}"
           exit 0
@@ -285,7 +279,6 @@ module Worcestershire
         worcestershire -w password admin -o wordlist.txt
         worcestershire -i words.txt -c 1 2 3 -e base64
         worcestershire -i names.txt -c 6 7 8 --format json --compress
-        worcestershire --interactive
         worcestershire --explain 1 3 5
         worcestershire -i base.txt --suggest
         worcestershire -i words.txt --preset password-cracking

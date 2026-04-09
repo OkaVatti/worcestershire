@@ -1,7 +1,6 @@
 require "./cli"
 require "./generator"
 require "./utils"
-require "./wizard"
 require "./benchmark"
 require "./pattern"
 require "./pipeline"
@@ -12,7 +11,7 @@ module Worcestershire
   class App
     def run
       if ARGV.empty?
-        Wizard.new.run
+        puts "please provide an argument or option"
       else
         cli = CLI.new
         options = cli.parse
