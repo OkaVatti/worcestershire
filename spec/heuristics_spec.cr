@@ -75,7 +75,7 @@ module Worcestershire
       end
 
       it "handles a single-character word without raising" do
-        expect_raises?(Exception) do
+        expect_raises(Exception) do
           Heuristics.suggest_combinations(["a"])
         end.should be_nil
       end
