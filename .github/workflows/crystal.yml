@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: ["mother"]
+  pull_request:
+    branches: ["mother"]
+
+# One run per branch; cancel earlier runs when a new push arrives.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CRYSTAL_WORKERS: 1 # keeps fiber tests deterministic
+  SHARDS_CACHE_PATH: ~/.cache/shards
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1 — unit + in-process specs  (no compiled binary required)
+  # ---------------------------------------------------------------------------
+  spec:
+    name: "spec / ${{ matrix.os }} / crystal ${{ matrix.crystal }}"
+    runs-on: ${{ matrix.os }}
+    # Nightly builds are informational; don't block merges on failures.
+    continue-on-error: ${{ matrix.crystal == 'nightly' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        crystal: ["1.19.1", "latest", "nightly"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Crystal ${{ matrix.crystal }}
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: ${{ matrix.crystal }}
+
+      - name: Cache shards
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/shards
+            lib
+            .shards
+          key: ${{ runner.os }}-shards-${{ hashFiles('shard.lock') }}
+          restore-keys: ${{ runner.os }}-shards-
+
+      - name: Install dependencies
+        run: shards install --frozen
+
+      # Run every spec file except the binary integration file, which
+      # requires a compiled binary and runs in the integration job below.
+      - name: Run unit specs (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          crystal spec \
+            spec/bloom_filter_spec.cr \
+            spec/cache_spec.cr \
+            spec/encodings_spec.cr \
+            spec/generator_spec.cr \
+            spec/heuristics_spec.cr \
+            spec/logger_spec.cr \
+            spec/pattern_spec.cr \
+            spec/pipeline_spec.cr \
+            spec/resume_spec.cr \
+            spec/rules_spec.cr \
+            spec/transformers_spec.cr \
+            spec/worker_pool_spec.cr \
+            --error-trace --no-color
+        timeout-minutes: 20
+
+      - name: Run unit specs (Windows)
+        if: runner.os == 'Windows'
+        run: >
+          crystal spec
+          spec/bloom_filter_spec.cr
+          spec/cache_spec.cr
+          spec/encodings_spec.cr
+          spec/generator_spec.cr
+          spec/heuristics_spec.cr
+          spec/logger_spec.cr
+          spec/pattern_spec.cr
+          spec/pipeline_spec.cr
+          spec/resume_spec.cr
+          spec/rules_spec.cr
+          spec/transformers_spec.cr
+          spec/worker_pool_spec.cr
+          --error-trace --no-color
+        timeout-minutes: 20
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — compile binary + integration tests against the real binary
+  # ---------------------------------------------------------------------------
+  integration:
+    name: "integration / ${{ matrix.os }} / crystal ${{ matrix.crystal }}"
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.crystal == 'nightly' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        crystal: ["1.19.1", "latest", "nightly"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Crystal ${{ matrix.crystal }}
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: ${{ matrix.crystal }}
+
+      - name: Cache shards
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/shards
+            lib
+            .shards
+          key: ${{ runner.os }}-shards-${{ hashFiles('shard.lock') }}
+          restore-keys: ${{ runner.os }}-shards-
+
+      - name: Install dependencies
+        run: shards install --frozen
+
+      - name: Build release binary
+        run: shards build --release --no-debug
+        timeout-minutes: 15
+
+      - name: Verify binary (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: test -x bin/worcestershire
+
+      - name: Verify binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "bin\worcestershire.exe")) {
+            Write-Error "Binary not found"
+            exit 1
+          }
+
+      - name: Run integration specs
+        run: crystal spec spec/integration_binary_spec.cr --error-trace --no-color
+        timeout-minutes: 10
+
+  # ---------------------------------------------------------------------------
+  # Job 3 — static analysis (ameba linter, Linux only)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
+      - name: Cache shards
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/shards
+            lib
+            .shards
+          key: ubuntu-shards-lint-${{ hashFiles('shard.lock') }}
+
+      - name: Install dependencies
+        run: shards install --frozen
+
+      - name: Run ameba
+        run: bin/ameba --no-color
