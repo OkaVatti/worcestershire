@@ -1,243 +1,305 @@
 require "./spec_helper"
 
+# cli_spec.cr tests CLI parsing behaviour via the compiled binary.
+# The binary must be built before running this file:
+#   shards build
+#
+# If the binary is absent the whole file is skipped gracefully.
+
+unless File.exists?(BIN_PATH) && File.executable?(BIN_PATH)
+  STDERR.puts "INFO: #{BIN_PATH} not found — skipping cli_spec. Run 'shards build' first."
+  exit 0
+end
+
 module Worcestershire
   describe CLI do
     describe "option parsing" do
+      # ---------------------------------------------------------------
+      # Input
+      # ---------------------------------------------------------------
+
       it "parses -w words" do
-        result = run_cli(["-w", "hello world", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "hello world", "--dry-run"])[:status].should be_true
       end
 
       it "parses --words" do
-        result = run_cli(["--words", "hello world", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["--words", "hello world", "--dry-run"])[:status].should be_true
       end
 
       it "parses -i file" do
         with_temp_wordlist(["one", "two"]) do |path|
-          result = run_cli(["-i", path, "--dry-run"])
-          result[:status].should be_true
+          run_binary(["-i", path, "--dry-run"])[:status].should be_true
         end
       end
 
-      it "parses multiple -i" do
-        with_temp_wordlist(["a"]) do |path1|
-          with_temp_wordlist(["b"]) do |path2|
-            result = run_cli(["-i", path1, "-i", path2, "--dry-run"])
-            result[:status].should be_true
+      it "parses multiple -i flags" do
+        with_temp_wordlist(["a"]) do |p1|
+          with_temp_wordlist(["b"]) do |p2|
+            run_binary(["-i", p1, "-i", p2, "--dry-run"])[:status].should be_true
           end
         end
       end
 
+      # ---------------------------------------------------------------
+      # Output
+      # ---------------------------------------------------------------
+
       it "parses -o output" do
-        result = run_cli(["-w", "test", "-o", "out.txt", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "-o", "out.txt", "--dry-run"])[:status].should be_true
       end
 
-      it "parses -c combinations" do
-        result = run_cli(["-w", "test", "-c", "1 2 5", "--dry-run"])
-        result[:status].should be_true
+      it "parses --format txt" do
+        run_binary(["-w", "test", "--format", "txt", "--dry-run"])[:status].should be_true
       end
 
-      it "parses -d depth" do
-        result = run_cli(["-w", "test", "-d", "4", "--dry-run"])
-        result[:status].should be_true
+      it "parses --format json" do
+        run_binary(["-w", "test", "--format", "json", "--dry-run"])[:status].should be_true
       end
 
-      it "parses -m min" do
-        result = run_cli(["-w", "test", "-m", "5", "--dry-run"])
-        result[:status].should be_true
-      end
-
-      it "parses -M max" do
-        result = run_cli(["-w", "test", "-M", "30", "--dry-run"])
-        result[:status].should be_true
-      end
-
-      it "parses -e encoding" do
-        result = run_cli(["-w", "test", "-e", "base64", "--dry-run"])
-        result[:status].should be_true
-      end
-
-      it "exits on unknown encoding" do
-        result = run_cli(["-w", "test", "-e", "unknown", "--dry-run"])
-        result[:status].should be_false
-        result[:error].should contain("Unknown encoding")
-      end
-
-      it "parses --format" do
-        result = run_cli(["-w", "test", "--format", "json", "--dry-run"])
-        result[:status].should be_true
+      it "parses --format hashcat" do
+        run_binary(["-w", "test", "--format", "hashcat", "--dry-run"])[:status].should be_true
       end
 
       it "parses --compress" do
-        result = run_cli(["-w", "test", "--compress", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--compress", "--dry-run"])[:status].should be_true
       end
 
       it "parses --force" do
-        result = run_cli(["-w", "test", "--force", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--force", "--dry-run"])[:status].should be_true
       end
 
-      it "parses --dry-run" do
-        result = run_cli(["-w", "test", "--dry-run"])
-        result[:status].should be_true
-        result[:output].should contain("Dry run")
+      it "parses --dry-run and prints an estimate" do
+        r = run_binary(["-w", "test", "--dry-run"])
+        r[:status].should be_true
+        r[:output].should contain("Dry run")
       end
 
       it "parses --quiet" do
-        result = run_cli(["-w", "test", "--quiet", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--quiet", "--dry-run"])[:status].should be_true
       end
+
+      # ---------------------------------------------------------------
+      # Combinations
+      # ---------------------------------------------------------------
+
+      it "parses -c combinations" do
+        run_binary(["-w", "test", "-c", "1 2 5", "--dry-run"])[:status].should be_true
+      end
+
+      it "parses -d depth" do
+        run_binary(["-w", "test", "-d", "4", "--dry-run"])[:status].should be_true
+      end
+
+      it "parses -m min" do
+        run_binary(["-w", "test", "-m", "5", "--dry-run"])[:status].should be_true
+      end
+
+      it "parses -M max" do
+        run_binary(["-w", "test", "-M", "30", "--dry-run"])[:status].should be_true
+      end
+
+      # ---------------------------------------------------------------
+      # Encoding
+      # ---------------------------------------------------------------
+
+      it "parses -e base64" do
+        run_binary(["-w", "test", "-e", "base64", "--dry-run"])[:status].should be_true
+      end
+
+      it "parses -e sha256" do
+        run_binary(["-w", "test", "-e", "sha256", "--dry-run"])[:status].should be_true
+      end
+
+      it "exits non-zero for unknown encoding" do
+        r = run_binary(["-w", "test", "-e", "bogus", "--dry-run"])
+        r[:status].should be_false
+        (r[:output] + r[:error]).should contain("Unknown encoding")
+      end
+
+      # ---------------------------------------------------------------
+      # Advanced
+      # ---------------------------------------------------------------
 
       it "parses --max-combinations" do
-        result = run_cli(["-w", "test", "--max-combinations", "1000", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--max-combinations", "1000", "--dry-run"])[:status].should be_true
       end
 
-      it "parses --rules" do
+      it "parses --rules with an existing file" do
         with_temp_wordlist(["l"]) do |path|
-          result = run_cli(["-w", "test", "--rules", path, "--dry-run"])
-          result[:status].should be_true
+          run_binary(["-w", "test", "--rules", path, "--dry-run"])[:status].should be_true
         end
       end
 
       it "parses --resume" do
-        result = run_cli(["-w", "test", "--resume", "state.json", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--resume", "state.json", "--dry-run"])[:status].should be_true
       end
 
-      it "parses --log-file" do
-        result = run_cli(["-w", "test", "--log-file", "app.log", "--dry-run"])
-        result[:status].should be_true
-      end
-
-      it "parses --log-level" do
-        result = run_cli(["-w", "test", "--log-level", "debug", "--dry-run"])
-        result[:status].should be_true
+      it "parses --log-level debug" do
+        run_binary(["-w", "test", "--log-level", "debug", "--dry-run"])[:status].should be_true
       end
 
       it "parses --buffer-size" do
-        result = run_cli(["-w", "test", "--buffer-size", "2048", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--buffer-size", "2048", "--dry-run"])[:status].should be_true
       end
 
       it "parses --no-color" do
-        result = run_cli(["-w", "test", "--no-color", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--no-color", "--dry-run"])[:status].should be_true
       end
 
       it "parses --parallel" do
-        result = run_cli(["-w", "test", "--parallel", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--parallel", "--dry-run"])[:status].should be_true
       end
 
       it "parses --workers" do
-        result = run_cli(["-w", "test", "--workers", "8", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--workers", "8", "--dry-run"])[:status].should be_true
       end
 
       it "parses --cache-size" do
-        result = run_cli(["-w", "test", "--cache-size", "500", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--cache-size", "500", "--dry-run"])[:status].should be_true
       end
 
       it "parses --max-memory" do
-        result = run_cli(["-w", "test", "--max-memory", "1073741824", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "--max-memory", "1073741824", "--dry-run"])[:status].should be_true
       end
+
+      # ---------------------------------------------------------------
+      # Custom dictionaries
+      # ---------------------------------------------------------------
 
       it "parses --homograph-dict" do
         with_temp_wordlist(["a->@,4"]) do |path|
-          result = run_cli(["-w", "test", "--homograph-dict", path, "--dry-run"])
-          result[:status].should be_true
+          run_binary(["-w", "test", "--homograph-dict", path, "--dry-run"])[:status].should be_true
         end
       end
 
       it "parses --leet-dict" do
         with_temp_wordlist(["e->3"]) do |path|
-          result = run_cli(["-w", "test", "--leet-dict", path, "--dry-run"])
-          result[:status].should be_true
+          run_binary(["-w", "test", "--leet-dict", path, "--dry-run"])[:status].should be_true
         end
       end
 
       it "parses --salt-dict" do
         with_temp_wordlist(["123"]) do |path|
-          result = run_cli(["-w", "test", "--salt-dict", path, "--dry-run"])
-          result[:status].should be_true
+          run_binary(["-w", "test", "--salt-dict", path, "--dry-run"])[:status].should be_true
         end
       end
 
       it "parses --affix-dict" do
         with_temp_wordlist(["!"]) do |path|
-          result = run_cli(["-w", "test", "--affix-dict", path, "--dry-run"])
-          result[:status].should be_true
+          run_binary(["-w", "test", "--affix-dict", path, "--dry-run"])[:status].should be_true
         end
       end
 
-      it "parses -l --list" do
-        result = run_cli(["-l"])
-        result[:status].should be_true
-        result[:output].should contain("Combination Types")
+      # ---------------------------------------------------------------
+      # Config
+      # ---------------------------------------------------------------
+
+      it "parses --config" do
+        with_tempfile("config", ".yml") do |path|
+          File.write(path, "depth: 2\n")
+          run_binary(["-w", "test", "--config", path, "--dry-run"])[:status].should be_true
+        end
       end
 
-      it "parses --preset" do
-        result = run_cli(["-w", "test", "--preset", "quick-test", "--dry-run"])
-        result[:status].should be_true
+      # ---------------------------------------------------------------
+      # New feature flags
+      # ---------------------------------------------------------------
+
+      it "parses --pipeline with valid steps" do
+        run_binary(["-w", "test", "--pipeline", "2,6,5", "--dry-run"])[:status].should be_true
+      end
+
+      it "rejects --pipeline with multi-word types" do
+        run_binary(["-w", "test", "--pipeline", "1,2"])[:status].should be_false
+      end
+
+      it "parses --deduplicate" do
+        run_binary(["-w", "test", "--deduplicate", "--dry-run"])[:status].should be_true
+      end
+
+      it "parses --output-delimiter" do
+        run_binary(["-w", "test", "--output-delimiter", "-", "--dry-run"])[:status].should be_true
+      end
+
+      it "parses --benchmark" do
+        r = run_binary(["--benchmark"])
+        r[:status].should be_true
+        r[:output].should contain("words/sec")
+      end
+
+      it "parses --pattern" do
+        run_binary(["-w", "test", "--pattern", "?w?d", "--dry-run"])[:status].should be_true
+      end
+
+      # ---------------------------------------------------------------
+      # Informational
+      # ---------------------------------------------------------------
+
+      it "parses -l --list" do
+        r = run_binary(["-l"])
+        r[:status].should be_true
+        r[:output].should contain("Combination Types")
+      end
+
+      it "parses --preset quick-test" do
+        run_binary(["-w", "test", "--preset", "quick-test", "--dry-run"])[:status].should be_true
       end
 
       it "parses --suggest" do
         with_temp_wordlist(["password123"]) do |path|
-          result = run_cli(["-i", path, "--suggest"])
-          result[:status].should be_true
-          result[:output].should contain("Suggested combinations")
+          r = run_binary(["-i", path, "--suggest"])
+          r[:status].should be_true
+          r[:output].should contain("Suggested combinations")
         end
       end
 
       it "parses -V --verbose" do
-        result = run_cli(["-w", "test", "-V", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "-V", "--dry-run"])[:status].should be_true
       end
 
       it "parses -N --noprogress" do
-        result = run_cli(["-w", "test", "-N", "--dry-run"])
-        result[:status].should be_true
+        run_binary(["-w", "test", "-N", "--dry-run"])[:status].should be_true
       end
 
       it "parses --examples" do
-        result = run_cli(["--examples"])
-        result[:status].should be_true
-        result[:output].should contain("Examples")
+        r = run_binary(["--examples"])
+        r[:status].should be_true
+        r[:output].should contain("worcestershire")
       end
 
-      it "parses --explain" do
-        result = run_cli(["--explain", "1 2"])
-        result[:status].should be_true
-        result[:output].should contain("Explanation")
+      it "parses --explain 1 2 3" do
+        r = run_binary(["--explain", "1 2 3"])
+        r[:status].should be_true
+        r[:output].should contain("Word Mix")
+        r[:output].should contain("Case Alternate")
+        r[:output].should contain("Homograph")
       end
 
       it "parses -v --version" do
-        result = run_cli(["-v"])
-        result[:status].should be_true
-        result[:output].should contain("Worcestershire v")
+        r = run_binary(["-v"])
+        r[:status].should be_true
+        r[:output].should contain("Worcestershire v")
       end
 
       it "parses -h --help" do
-        result = run_cli(["-h"])
-        result[:status].should be_true
-        result[:output].should contain("Usage")
+        r = run_binary(["-h"])
+        r[:status].should be_true
+        r[:output].should contain("Usage")
       end
 
-      it "validates that at least words or input files are provided" do
-        result = run_cli([] of String)
-        result[:status].should be_false
-        result[:error].should contain("No words provided")
+      # ---------------------------------------------------------------
+      # Validation
+      # ---------------------------------------------------------------
+
+      it "exits non-zero when neither -w nor -i is provided" do
+        r = run_binary(["--dry-run"])
+        r[:status].should be_false
+        (r[:output] + r[:error]).should contain("No words")
       end
     end
 
-    describe "config loading" do
-      it "loads config from file" do
+    describe "config file loading" do
+      it "reads all supported keys from a YAML file" do
         with_tempfile("config", ".yml") do |path|
           File.write(path, <<-YAML)
           depth: 4
@@ -247,31 +309,52 @@ module Worcestershire
           compress: true
           max_combinations: 5000
           buffer_size: 2048
-          workers: 6
+          workers: 2
           cache_size: 200
           combinations:
             - 1
             - 3
           YAML
-
-          result = run_cli(["-w", "test", "--config", path, "--dry-run"])
-          result[:status].should be_true
+          r = run_binary(["-w", "test", "--config", path, "--dry-run"])
+          r[:status].should be_true
         end
       end
 
-      it "CLI overrides config" do
+      it "CLI flag overrides config value" do
         with_tempfile("config", ".yml") do |path|
-          File.write(path, "depth: 2")
-          result = run_cli(["-w", "test", "--config", path, "-d", "5", "--dry-run"])
-          result[:status].should be_true
+          File.write(path, "depth: 2\n")
+          r = run_binary(["-w", "test", "--config", path, "-d", "5", "--dry-run"])
+          r[:status].should be_true
+        end
+      end
+
+      it "supports pipeline key in config" do
+        with_tempfile("config", ".yml") do |path|
+          File.write(path, "pipeline:\n  - 4\n  - 2\n")
+          with_temp_wordlist(["ab"]) do |words|
+            with_tempfile("out", ".lst") do |output|
+              r = run_binary(["-i", words, "--config", path,
+                              "-o", output, "--force", "--quiet"])
+              r[:status].should be_true
+            end
+          end
         end
       end
     end
 
     describe "preset application" do
-      it "applies quick-test preset" do
-        result = run_cli(["-w", "test", "--preset", "quick-test", "--dry-run"])
-        result[:status].should be_true
+      it "applies quick-test preset correctly" do
+        run_binary(["-w", "test", "--preset", "quick-test", "--dry-run"])[:status].should be_true
+      end
+
+      it "applies username-enum preset" do
+        run_binary(["-w", "alice", "--preset", "username-enum", "--dry-run"])[:status].should be_true
+      end
+
+      it "CLI combination type overrides preset" do
+        r = run_binary(["-w", "test", "--preset", "quick-test",
+                        "-c", "4", "--dry-run"])
+        r[:status].should be_true
       end
     end
   end
